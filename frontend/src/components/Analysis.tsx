@@ -1,8 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import { getAnalysis } from '../services/api';
 import {
-  LineChart,
-  Line,
   XAxis,
   YAxis,
   CartesianGrid,
@@ -15,7 +13,6 @@ import {
   Cell,
   BarChart,
   Bar,
-  Legend,
 } from 'recharts';
 import { ArrowLeft, TrendingUp, TrendingDown, Activity, Target, Shield, Zap } from 'lucide-react';
 
