@@ -1,0 +1,78 @@
+version: '3.8'
+
+# Production override file
+# Usage: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+
+services:
+  backend:
+    image: polymarket-bot-backend:latest
+    environment:
+      - LOG_LEVEL=INFO
+      - PAPER_TRADING=false
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+
+  frontend:
+    image: polymarket-bot-frontend:latest
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 256M
+        reservations:
+          cpus: '0.25'
+          memory: 64M
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+
+  # Optional: Traefik reverse proxy for SSL/TLS
+  # Uncomment below to enable HTTPS with Let's Encrypt
+  #
+  # traefik:
+  #   image: traefik:v3.0
+  #   container_name: polymarket-traefik
+  #   command:
+  #     - "--api.dashboard=true"
+  #     - "--providers.docker=true"
+  #     - "--providers.docker.exposedbydefault=false"
+  #     - "--entrypoints.web.address=:80"
+  #     - "--entrypoints.websecure.address=:443"
+  #     - "--certificatesresolvers.letsencrypt.acme.tlschallenge=true"
+  #     - "--certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL}"
+  #     - "--certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json"
+  #     - "--entrypoints.web.http.redirections.entryPoint.to=websecure"
+  #   ports:
+  #     - "80:80"
+  #     - "443:443"
+  #   volumes:
+  #     - /var/run/docker.sock:/var/run/docker.sock:ro
+  #     - traefik-certs:/letsencrypt
+  #   networks:
+  #     - polymarket-network
+  #   restart: unless-stopped
+  #
+  # Then add labels to frontend service:
+  #   labels:
+  #     - "traefik.enable=true"
+  #     - "traefik.http.routers.polymarket.rule=Host(`${DOMAIN}`)"
+  #     - "traefik.http.routers.polymarket.entrypoints=websecure"
+  #     - "traefik.http.routers.polymarket.tls.certresolver=letsencrypt"
+  #     - "traefik.http.services.polymarket.loadbalancer.server.port=3000"
+
+# volumes:
+#   traefik-certs:
+#     name: polymarket-traefik-certs

@@ -1,0 +1,25 @@
+version: '3.8'
+
+# Development docker-compose file
+# Backend and frontend are run manually outside Docker
+# This file is for any supporting services you might need later
+
+services:
+  # Placeholder for future services (e.g., Redis, PostgreSQL)
+  # For now, run backend and frontend manually:
+  #
+  # Backend (with uv):
+  #   cd backend
+  #   uv venv
+  #   .venv\Scripts\activate  (Windows) or source .venv/bin/activate (Linux/Mac)
+  #   uv pip install -e .
+  #   uvicorn app.main:app --reload --port 8000
+  #
+  # Frontend:
+  #   cd frontend
+  #   npm install
+  #   npm run dev
+
+networks:
+  default:
+    name: polymarket-bot-dev
