@@ -61,7 +61,8 @@ export const getMarketInfo = async (marketId: string): Promise<MarketInfo> => {
 export const getTrades = async (
   page = 1,
   pageSize = 20,
-  marketId?: string
+  marketId?: string,
+  excludeMarketId?: string
 ): Promise<TradeListResponse> => {
   const params = new URLSearchParams({
     page: page.toString(),
@@ -69,6 +70,9 @@ export const getTrades = async (
   });
   if (marketId) {
     params.append('market_id', marketId);
+  }
+  if (excludeMarketId) {
+    params.append('exclude_market_id', excludeMarketId);
   }
   const response = await api.get<TradeListResponse>(`/api/trades?${params}`);
   return response.data;

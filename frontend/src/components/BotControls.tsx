@@ -117,9 +117,20 @@ export default function BotControls() {
           </div>
         )}
         {!status?.paper_trading && (
-          <p className="text-xs text-red-400 mt-2">
-            Live trading enabled - real money will be used
-          </p>
+          <div className="mt-3 pt-3 border-t border-gray-600">
+            <div className="flex items-center justify-between text-sm">
+              <span className="text-gray-400">Live Balance</span>
+              <div className="flex items-center gap-1 text-green-400 font-mono">
+                <DollarSign className="w-4 h-4" />
+                {status?.live_balance !== null && status?.live_balance !== undefined
+                  ? status.live_balance.toFixed(2)
+                  : 'Loading...'}
+              </div>
+            </div>
+            <p className="text-xs text-red-400 mt-2">
+              Live trading enabled - real money will be used
+            </p>
+          </div>
         )}
       </div>
 

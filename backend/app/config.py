@@ -31,6 +31,8 @@ class Settings(BaseSettings):
     polymarket_api_key: str = Field(default="", description="Polymarket API key")
     polymarket_api_secret: str = Field(default="", description="Polymarket API secret")
     polymarket_api_passphrase: str = Field(default="", description="Polymarket API passphrase")
+    funder_address: str = Field(default="", description="Proxy wallet address (funder) - find on Polymarket account page")
+    signature_type: int = Field(default=1, description="Signature type: 0=EOA, 1=Poly Proxy, 2=Gnosis Safe")
 
     # Environment
     use_testnet: bool = Field(default=True, description="Use testnet instead of mainnet")
@@ -38,11 +40,24 @@ class Settings(BaseSettings):
 
     # Trading Parameters
     order_size: float = Field(default=100.0, description="Shares per trade")
-    buy_price: float = Field(default=0.8, description="Limit buy price")
-    sell_price: float = Field(default=0.5, description="Sell price after buy fills")
-    max_loss: float = Field(default=0.3, description="Square off threshold")
-    price_target: float = Field(default=0.98, description="Sell when price hits this")
+    buy_price: float = Field(default=0.8, description="Limit buy price (legacy)")
+    sell_price: float = Field(default=0.5, description="Sell price after buy fills (legacy)")
+    max_loss: float = Field(default=0.3, description="Square off threshold (legacy)")
+    price_target: float = Field(default=0.98, description="Sell when price hits this (legacy)")
     time_threshold: int = Field(default=3, description="Minutes before close to start trading")
+    max_positions_per_market: int = Field(default=3, description="Maximum positions (buy-sell cycles) per market")
+
+    # Strategy Parameters (configurable entry/exit levels)
+    trigger_price: float = Field(default=0.75, description="Entry trigger - buy when price >= this")
+    entry_min: float = Field(default=0.78, description="Minimum price for entry signal range (legacy)")
+    entry_max: float = Field(default=0.80, description="Maximum price for entry signal range (legacy)")
+    stoploss: float = Field(default=0.55, description="Stoploss price - limit sell placed here")
+    target: float = Field(default=0.99, description="Target price - limit sell placed here")
+    order_cancel_threshold: float = Field(default=0.167, description="Cancel unfilled orders when time to close < this (minutes). Default 10 seconds = 0.167 min")
+
+    # Fees
+    taker_fee_rate: float = Field(default=0.001, description="Taker fee rate (0.001 = 0.10% or 10 basis points)")
+    min_taker_fee: float = Field(default=0.001, description="Minimum taker fee in dollars")
 
     # Paper Trading
     paper_trading: bool = Field(default=True, description="Enable paper trading mode (simulated trades)")

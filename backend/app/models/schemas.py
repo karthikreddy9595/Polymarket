@@ -79,6 +79,7 @@ class BotStatusResponse(BaseModel):
     paper_trading: bool = True
     paper_balance: float = 1000.0
     paper_starting_balance: float = 1000.0
+    live_balance: Optional[float] = None  # Live USDC balance from Polymarket
 
     class Config:
         from_attributes = True

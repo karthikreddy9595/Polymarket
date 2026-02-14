@@ -12,7 +12,7 @@ from urllib.parse import quote
 import aiohttp
 import requests
 from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import ApiCreds, OrderArgs, OrderType
+from py_clob_client.clob_types import ApiCreds, OrderArgs, OrderType, PartialCreateOrderOptions, BalanceAllowanceParams, AssetType
 from py_clob_client.order_builder.constants import BUY, SELL
 
 from .config import get_settings
@@ -72,9 +72,7 @@ class LivePriceStream:
                     data = await response.json()
                     mid = data.get("mid")
                     if mid is not None:
-                        price = float(mid)
-                        logger.info(f"[LIVE] {token_id[:16]}... = {price:.4f}")
-                        return price
+                        return float(mid)
 
             # Fallback to /price endpoint
             url = f"{settings.polymarket_host}/price"
@@ -85,18 +83,9 @@ class LivePriceStream:
                     data = await response.json()
                     price_str = data.get("price")
                     if price_str is not None:
-                        price = float(price_str)
-                        logger.info(f"[LIVE/price] {token_id[:16]}... = {price:.4f}")
-                        return price
-
-            logger.warning(f"[LIVE] No price available for {token_id[:20]}...")
+                        return float(price_str)
             return None
-
-        except asyncio.TimeoutError:
-            logger.error(f"[LIVE] Timeout for {token_id[:20]}...")
-            return None
-        except Exception as e:
-            logger.error(f"[LIVE] Error: {e}")
+        except Exception:
             return None
 
     async def get_live_prices_batch(self, token_ids: List[str]) -> Dict[str, float]:
@@ -132,6 +121,11 @@ class PolymarketClient:
             # Start live price stream
             await self.live_prices.start()
 
+            # Set up collateral (USDC) allowance for buying
+            logger.info("Setting up trading allowances...")
+            await self.ensure_collateral_allowance()
+            # Note: Conditional token allowance is set per-token when selling
+
             logger.info("Connected to Polymarket successfully")
             return True
         except Exception as e:
@@ -141,22 +135,25 @@ class PolymarketClient:
 
     def _sync_connect(self) -> None:
         """Synchronous connection setup."""
-        creds = ApiCreds(
-            api_key=self.settings.polymarket_api_key,
-            api_secret=self.settings.polymarket_api_secret,
-            api_passphrase=self.settings.polymarket_api_passphrase,
-        )
+        # Get signature type and funder from config
+        signature_type = self.settings.signature_type
+        funder = self.settings.funder_address
 
         self.client = ClobClient(
             host=self.settings.polymarket_host,
             key=self.settings.private_key,
             chain_id=self.settings.chain_id,
-            creds=creds,
+            signature_type=signature_type,
+            funder=funder,
         )
 
-        # Derive API credentials if needed
         if self.settings.private_key:
-            self.client.set_api_creds(self.client.create_or_derive_api_creds())
+            try:
+                derived_creds = self.client.create_or_derive_api_creds()
+                self.client.set_api_creds(derived_creds)
+            except Exception as e:
+                logger.error(f"Failed to derive credentials: {e}")
+                raise
 
     @property
     def is_connected(self) -> bool:
@@ -176,7 +173,9 @@ class PolymarketClient:
         token_id: str,
         side: str,
         price: float,
-        size: float
+        size: float,
+        tick_size: str = "0.01",
+        neg_risk: bool = False
     ) -> Optional[Dict[str, Any]]:
         """
         Place a limit order.
@@ -186,6 +185,8 @@ class PolymarketClient:
             side: "buy" or "sell"
             price: Limit price (0.0 to 1.0)
             size: Number of shares
+            tick_size: Minimum price increment (from market data, e.g., "0.01" or "0.001")
+            neg_risk: Whether this is a negative risk market (multi-outcome events)
 
         Returns:
             Order response dict or None if failed
@@ -195,6 +196,14 @@ class PolymarketClient:
             return None
 
         try:
+            # Ensure proper allowance is set before placing order
+            if side.lower() == "sell":
+                # Selling requires conditional token allowance for the specific token
+                await self.ensure_conditional_allowance(token_id)
+            else:
+                # Buying requires collateral (USDC) allowance
+                await self.ensure_collateral_allowance()
+
             order_side = BUY if side.lower() == "buy" else SELL
 
             order_args = OrderArgs(
@@ -204,15 +213,19 @@ class PolymarketClient:
                 side=order_side,
             )
 
-            result = await self._run_sync(
-                self.client.create_and_post_order,
-                order_args
+            # Market options required by Polymarket API (must be object, not dict)
+            options = PartialCreateOrderOptions(
+                tick_size=tick_size,
+                neg_risk=neg_risk
             )
 
-            logger.info(f"Placed {side} order: {size} @ {price} for token {token_id}")
+            # Call create_and_post_order
+            result = await self._run_sync(
+                lambda: self.client.create_and_post_order(order_args, options)
+            )
             return result
         except Exception as e:
-            logger.error(f"Failed to place order: {e}")
+            logger.error(f"[LIVE] Order failed: {e}")
             return None
 
     async def cancel_order(self, order_id: str) -> bool:
@@ -222,10 +235,8 @@ class PolymarketClient:
 
         try:
             await self._run_sync(self.client.cancel, order_id)
-            logger.info(f"Cancelled order: {order_id}")
             return True
-        except Exception as e:
-            logger.error(f"Failed to cancel order {order_id}: {e}")
+        except Exception:
             return False
 
     async def cancel_all_orders(self) -> bool:
@@ -235,30 +246,28 @@ class PolymarketClient:
 
         try:
             await self._run_sync(self.client.cancel_all)
-            logger.info("Cancelled all orders")
             return True
-        except Exception as e:
-            logger.error(f"Failed to cancel all orders: {e}")
+        except Exception:
             return False
 
     async def get_order(self, order_id: str) -> Optional[Dict[str, Any]]:
         """Get order details by ID."""
-        if not self.is_connected:
+        if not self.is_connected or not self.client:
             return None
 
         try:
-            return await self._run_sync(self.client.get_order, order_id)
+            return await self._run_sync(lambda: self.client.get_order(order_id))
         except Exception as e:
-            logger.error(f"Failed to get order {order_id}: {e}")
+            logger.error(f"Failed to get order: {e}")
             return None
 
     async def get_open_orders(self, market_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """Get all open orders, optionally filtered by market."""
-        if not self.is_connected:
+        if not self.is_connected or not self.client:
             return []
 
         try:
-            result = await self._run_sync(self.client.get_orders)
+            result = await self._run_sync(lambda: self.client.get_orders())
             orders = result if isinstance(result, list) else []
 
             if market_id:
@@ -269,17 +278,182 @@ class PolymarketClient:
             logger.error(f"Failed to get open orders: {e}")
             return []
 
-    async def get_positions(self) -> List[Dict[str, Any]]:
-        """Get current positions."""
-        if not self.is_connected:
+    async def get_trades(self) -> List[Dict[str, Any]]:
+        """Get filled trade history."""
+        if not self.is_connected or not self.client:
             return []
 
         try:
-            result = await self._run_sync(self.client.get_positions)
+            result = await self._run_sync(lambda: self.client.get_trades())
             return result if isinstance(result, list) else []
+        except Exception as e:
+            logger.error(f"Failed to get trades: {e}")
+            return []
+
+    async def get_positions_api(self, user_address: str) -> List[Dict[str, Any]]:
+        """Get positions using Polymarket data-api."""
+        try:
+            url = "https://data-api.polymarket.com/positions"
+            params = {
+                "user": user_address,
+                "sizeThreshold": 0.1,
+                "limit": 100
+            }
+            response = await self._run_sync(lambda: requests.get(url, params=params))
+            if response.status_code == 200:
+                return response.json()
+            return []
         except Exception as e:
             logger.error(f"Failed to get positions: {e}")
             return []
+
+    async def get_balance(self) -> Optional[float]:
+        """Get USDC balance from Polymarket."""
+        if not self.is_connected or not self.client:
+            return None
+
+        try:
+            loop = asyncio.get_event_loop()
+            client = self.client
+            signature_type = self.settings.signature_type
+
+            def _get_balance_sync():
+                try:
+                    params = BalanceAllowanceParams(
+                        signature_type=signature_type,
+                        asset_type=AssetType.COLLATERAL
+                    )
+                    result = client.get_balance_allowance(params=params)
+                    if result and isinstance(result, dict):
+                        balance = result.get("balance")
+                        if balance is not None:
+                            return int(balance) / 10**6
+                except Exception:
+                    pass
+                return None
+
+            return await loop.run_in_executor(self._executor, _get_balance_sync)
+        except Exception:
+            return None
+
+    async def ensure_conditional_allowance(self, token_id: str) -> bool:
+        """
+        Ensure we have allowance set for a specific conditional token (YES/NO position).
+        This must be called before selling tokens.
+
+        Args:
+            token_id: The specific token ID to set allowance for (ERC1155 token)
+        """
+        if not self.is_connected or not self.client:
+            return False
+
+        try:
+            client = self.client
+            signature_type = self.settings.signature_type
+
+            def _set_allowance_sync():
+                try:
+                    # For ERC1155 conditional tokens, we need to pass the token_id
+                    params = BalanceAllowanceParams(
+                        signature_type=signature_type,
+                        asset_type=AssetType.CONDITIONAL,
+                        token_id=token_id
+                    )
+                    result = client.get_balance_allowance(params=params)
+                    logger.info(f"[ALLOWANCE] Conditional allowance for {token_id[:20]}...: {result}")
+
+                    # Check if allowance is already set (non-zero)
+                    allowances = result.get("allowances", {}) if result else {}
+                    has_allowance = any(int(v) > 0 for v in allowances.values()) if allowances else False
+
+                    if not has_allowance:
+                        # Set/update allowance for this conditional token
+                        update_result = client.update_balance_allowance(params=params)
+                        logger.info(f"[ALLOWANCE] Updated conditional allowance: {update_result}")
+                    else:
+                        logger.info(f"[ALLOWANCE] Conditional allowance already set")
+
+                    return True
+                except Exception as e:
+                    logger.error(f"[ALLOWANCE] Failed to set conditional allowance: {e}")
+                    return False
+
+            return await self._run_sync(_set_allowance_sync)
+        except Exception as e:
+            logger.error(f"[ALLOWANCE] Error: {e}")
+            return False
+
+    async def get_conditional_balance(self, token_id: str) -> Optional[float]:
+        """
+        Get the actual conditional token balance for a specific token.
+
+        Args:
+            token_id: The specific token ID (YES/NO token)
+
+        Returns:
+            Token balance as float, or None if failed
+        """
+        if not self.is_connected or not self.client:
+            return None
+
+        try:
+            client = self.client
+            signature_type = self.settings.signature_type
+
+            def _get_balance_sync():
+                try:
+                    params = BalanceAllowanceParams(
+                        signature_type=signature_type,
+                        asset_type=AssetType.CONDITIONAL,
+                        token_id=token_id
+                    )
+                    result = client.get_balance_allowance(params=params)
+                    if result and isinstance(result, dict):
+                        balance = result.get("balance")
+                        if balance is not None:
+                            # Balance is in base units (10^6 decimals)
+                            return int(balance) / 10**6
+                except Exception as e:
+                    logger.error(f"Failed to get conditional balance: {e}")
+                return None
+
+            return await self._run_sync(_get_balance_sync)
+        except Exception:
+            return None
+
+    async def ensure_collateral_allowance(self) -> bool:
+        """
+        Ensure we have allowance set for collateral (USDC).
+        This must be called before buying tokens.
+        """
+        if not self.is_connected or not self.client:
+            return False
+
+        try:
+            client = self.client
+            signature_type = self.settings.signature_type
+
+            def _set_allowance_sync():
+                try:
+                    params = BalanceAllowanceParams(
+                        signature_type=signature_type,
+                        asset_type=AssetType.COLLATERAL
+                    )
+                    result = client.get_balance_allowance(params=params)
+                    logger.info(f"[ALLOWANCE] Current collateral allowance: {result}")
+
+                    # Set/update allowance for collateral
+                    update_result = client.update_balance_allowance(params=params)
+                    logger.info(f"[ALLOWANCE] Updated collateral allowance: {update_result}")
+                    return True
+                except Exception as e:
+                    logger.error(f"[ALLOWANCE] Failed to set collateral allowance: {e}")
+                    return False
+
+            return await self._run_sync(_set_allowance_sync)
+        except Exception as e:
+            logger.error(f"[ALLOWANCE] Error: {e}")
+            return False
 
     async def get_market_info(self, market_id: str) -> Optional[Dict[str, Any]]:
         """Get market information including time to close."""
@@ -290,29 +464,17 @@ class PolymarketClient:
             if response.status_code == 200:
                 data = response.json()
 
-                # Handle array response (API returns array for single market)
                 if isinstance(data, list) and len(data) > 0:
                     data = data[0]
 
-                logger.debug(f"Raw market response keys: {data.keys() if isinstance(data, dict) else 'not a dict'}")
-
-                # Log the outcomePrices for debugging
-                if isinstance(data, dict):
-                    outcome_prices = data.get("outcomePrices")
-                    logger.debug(f"[get_market_info] outcomePrices from API: {outcome_prices}")
-
-                # Parse tokens from outcomes and clobTokenIds (they are JSON strings)
                 if isinstance(data, dict) and "tokens" not in data:
                     tokens = self._parse_tokens(data)
                     if tokens:
                         data["tokens"] = tokens
-                        logger.debug(f"Parsed tokens: {tokens}")
 
                 return data
-            logger.error(f"Market info request failed with status {response.status_code}")
             return None
-        except Exception as e:
-            logger.error(f"Failed to get market info: {e}")
+        except Exception:
             return None
 
     def _parse_tokens(self, market_data: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -324,18 +486,13 @@ class PolymarketClient:
             token_ids_str = market_data.get("clobTokenIds", "[]")
             prices_str = market_data.get("outcomePrices", "[]")
 
-            # Parse JSON strings
             outcomes = json.loads(outcomes_str) if isinstance(outcomes_str, str) else outcomes_str
             token_ids = json.loads(token_ids_str) if isinstance(token_ids_str, str) else token_ids_str
             prices = json.loads(prices_str) if isinstance(prices_str, str) else prices_str
 
-            logger.debug(f"Parsed outcomes: {outcomes}, token_ids: {token_ids}, prices: {prices}")
-
             if len(outcomes) != len(token_ids):
-                logger.warning(f"Outcomes/token_ids length mismatch: {len(outcomes)} vs {len(token_ids)}")
                 return []
 
-            # Map outcomes to tokens - "Up" maps to "Yes", "Down" maps to "No"
             outcome_mapping = {"Up": "Yes", "Down": "No", "Yes": "Yes", "No": "No"}
 
             for i, (outcome, token_id) in enumerate(zip(outcomes, token_ids)):
@@ -347,16 +504,41 @@ class PolymarketClient:
                     "original_outcome": outcome,
                     "price": price
                 })
-                if price is not None:
-                    logger.debug(f"[_parse_tokens] {mapped_outcome} ({token_id[:16]}...): price={price:.4f}")
 
             return tokens
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse tokens JSON: {e}")
+        except Exception:
             return []
-        except Exception as e:
-            logger.error(f"Failed to parse tokens: {e}")
-            return []
+
+    async def get_market_options(self, market_id: str) -> Dict[str, Any]:
+        """
+        Get market options required for order placement (tick_size, neg_risk).
+
+        Args:
+            market_id: The market condition ID
+
+        Returns:
+            Dict with tick_size (str) and neg_risk (bool)
+        """
+        # Default values
+        options = {
+            "tick_size": "0.01",
+            "neg_risk": False
+        }
+
+        try:
+            market_info = await self.get_market_info(market_id)
+            if market_info:
+                tick_size = market_info.get("minimum_tick_size") or market_info.get("tickSize") or market_info.get("minTickSize")
+                if tick_size:
+                    options["tick_size"] = str(tick_size)
+
+                neg_risk = market_info.get("neg_risk") or market_info.get("negRisk")
+                if neg_risk is not None:
+                    options["neg_risk"] = bool(neg_risk)
+        except Exception:
+            pass
+
+        return options
 
     async def get_orderbook(self, token_id: str) -> Optional[Dict[str, Any]]:
         """Get orderbook for a token."""
@@ -443,10 +625,6 @@ class PolymarketClient:
         current_query = f"Bitcoin Up or Down - {date_str}, {format_search_time(window_start_hour, window_start_min)} ET"
         next_query = f"Bitcoin Up or Down - {date_str}, {format_search_time(next_start_hour, next_start_min)} ET"
 
-        logger.info(f"[AUTO] Current ET time: {now_et.strftime('%Y-%m-%d %H:%M:%S')} {tz_name}")
-        logger.info(f"[AUTO] Search query 1: {current_query}")
-        logger.info(f"[AUTO] Search query 2: {next_query}")
-
         return [current_query, next_query]
 
     async def find_btc_5min_markets(self) -> List[Dict[str, Any]]:
@@ -461,23 +639,17 @@ class PolymarketClient:
             btc_markets = []
             now_utc = datetime.utcnow()
 
-            # Try each search query
             for query in search_queries:
                 encoded_query = quote(query)
                 url = f"{self.settings.gamma_host}/public-search?q={encoded_query}"
 
-                logger.info(f"[AUTO] Searching: {url}")
                 response = await self._run_sync(requests.get, url)
 
                 if response.status_code != 200:
-                    logger.error(f"Search failed: {response.status_code}")
                     continue
 
                 data = response.json()
-
-                # API returns: {"events": [{"markets": [...]}], "pagination": {...}}
                 events = data.get("events", [])
-                logger.info(f"[AUTO] Found {len(events)} events for: {query}")
 
                 for event in events:
                     # Each event contains a markets array
@@ -514,43 +686,23 @@ class PolymarketClient:
 
                             time_to_close = (end_date - now_utc).total_seconds() / 60
 
-                            # Only include markets that haven't closed yet
                             if time_to_close > 0:
                                 market["time_to_close_minutes"] = time_to_close
 
-                                # Parse tokens
                                 if "tokens" not in market:
                                     tokens = self._parse_tokens(market)
                                     if tokens:
                                         market["tokens"] = tokens
 
-                                logger.info(f"[AUTO] ✓ FOUND: {title} | {time_to_close:.1f} min | ID: {market_id}")
                                 btc_markets.append(market)
 
-                        except (ValueError, TypeError) as e:
-                            logger.debug(f"Error parsing end date: {e}")
+                        except (ValueError, TypeError):
                             continue
 
-            # Sort by time to close (nearest first)
             btc_markets.sort(key=lambda m: m.get("time_to_close_minutes", float("inf")))
-
-            if btc_markets:
-                selected = btc_markets[0]
-                logger.info(f"[AUTO] ========================================")
-                logger.info(f"[AUTO] FOUND {len(btc_markets)} MARKETS")
-                logger.info(f"[AUTO] SELECTED: {selected.get('question', '')}")
-                logger.info(f"[AUTO] MARKET ID: {selected.get('id') or selected.get('conditionId')}")
-                logger.info(f"[AUTO] CLOSES IN: {selected.get('time_to_close_minutes', 0):.1f} minutes")
-                logger.info(f"[AUTO] ========================================")
-            else:
-                logger.warning("[AUTO] No Bitcoin Up or Down markets found!")
-
             return btc_markets
 
-        except Exception as e:
-            logger.error(f"Failed to find BTC markets: {e}")
-            import traceback
-            traceback.print_exc()
+        except Exception:
             return []
 
     async def _log_all_btc_markets(self, markets: List[Dict[str, Any]]) -> None:

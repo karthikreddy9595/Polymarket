@@ -17,6 +17,7 @@ async def get_trades(
     page: int = Query(1, ge=1, description="Page number"),
     page_size: int = Query(20, ge=1, le=100, description="Items per page"),
     market_id: Optional[str] = Query(None, description="Filter by market ID"),
+    exclude_market_id: Optional[str] = Query(None, description="Exclude trades from this market ID (for history)"),
     db: AsyncSession = Depends(get_db)
 ):
     """Get paginated trade history."""
@@ -26,10 +27,15 @@ async def get_trades(
     if market_id:
         query = query.where(Trade.market_id == market_id)
 
+    if exclude_market_id:
+        query = query.where(Trade.market_id != exclude_market_id)
+
     # Get total count
     count_query = select(func.count()).select_from(Trade)
     if market_id:
         count_query = count_query.where(Trade.market_id == market_id)
+    if exclude_market_id:
+        count_query = count_query.where(Trade.market_id != exclude_market_id)
 
     total_result = await db.execute(count_query)
     total = total_result.scalar() or 0

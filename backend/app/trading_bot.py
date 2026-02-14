@@ -33,7 +33,7 @@ class BotAction(Enum):
     PRICE_TARGET = "Price target reached"
     MAX_LOSS = "Max loss triggered"
     # Paper trading specific actions
-    PAPER_WATCHING = "Watching for entry at 0.75"
+    PAPER_WATCHING = "Watching for entry (0.78-0.80)"
     PAPER_BOUGHT = "Paper position opened"
     PAPER_MONITORING = "Monitoring SL/Target"
 
@@ -41,14 +41,86 @@ class BotAction(Enum):
 class PaperTradingState:
     """Track paper trading strategy state."""
     def __init__(self):
-        self.reset()
+        self.position_open = False
+        self.entry_price = 0.0
+        self.entry_side = None
+        self.entry_token_id = None
+        self.positions_taken = 0
 
     def reset(self):
-        """Reset all state."""
-        self.position_open: bool = False
-        self.entry_price: float = 0.0
-        self.entry_side: Optional[str] = None  # "YES" or "NO"
-        self.entry_token_id: Optional[str] = None
+        """Reset position state (preserves positions_taken externally)."""
+        logger.debug(f"[STATE] PaperTradingState.reset() called - position_open was {self.position_open}")
+        self.position_open = False
+        self.entry_price = 0.0
+        self.entry_side = None
+        self.entry_token_id = None
+        self.positions_taken = 0
+        logger.debug(f"[STATE] PaperTradingState.reset() done - position_open is now {self.position_open}")
+
+    def close_position(self):
+        """Close current position and increment positions_taken."""
+        logger.info(f"[STATE] Closing paper position - was open: {self.position_open}, positions_taken: {self.positions_taken}")
+        self.position_open = False
+        self.entry_price = 0.0
+        self.entry_side = None
+        self.entry_token_id = None
+        self.positions_taken += 1
+        logger.info(f"[STATE] Paper position closed - position_open: {self.position_open}, positions_taken: {self.positions_taken}")
+
+
+class LiveTradingState:
+    """Track live trading strategy state."""
+    def __init__(self):
+        self.position_open = False
+        self.entry_price = 0.0
+        self.entry_side = None
+        self.entry_token_id = None
+        self.positions_taken = 0
+        self.buy_order_id = None
+        self.buy_filled = False
+        self.filled_size = 0.0
+        self.stoploss_price = 0.0
+        self.stoploss_order_id = None
+        self.stoploss_order_placed = False
+        self.use_soft_stoploss = False
+        self.sell_attempted = False
+
+    def reset(self):
+        """Reset all state (preserves positions_taken externally)."""
+        logger.debug(f"[STATE] LiveTradingState.reset() called - position_open was {self.position_open}")
+        self.position_open = False
+        self.entry_price = 0.0
+        self.entry_side = None
+        self.entry_token_id = None
+        self.positions_taken = 0
+        self.buy_order_id = None
+        self.buy_filled = False
+        self.filled_size = 0.0
+        self.stoploss_price = 0.0
+        self.stoploss_order_id = None
+        self.stoploss_order_placed = False
+        self.use_soft_stoploss = False
+        self.sell_attempted = False
+        logger.debug(f"[STATE] LiveTradingState.reset() done - position_open is now {self.position_open}")
+
+    def close_position(self):
+        """Close current position and increment positions_taken."""
+        logger.info(f"[STATE] Closing live position - was open: {self.position_open}, positions_taken: {self.positions_taken}")
+        prev_positions = self.positions_taken
+        self.position_open = False
+        self.entry_price = 0.0
+        self.entry_side = None
+        self.entry_token_id = None
+        self.buy_order_id = None
+        self.buy_filled = False
+        self.filled_size = 0.0
+        self.stoploss_price = 0.0
+        self.stoploss_order_id = None
+        self.stoploss_order_placed = False
+        self.use_soft_stoploss = False
+        self.sell_attempted = False
+        self.positions_taken = prev_positions + 1
+        logger.info(f"[STATE] Live position closed - position_open: {self.position_open}, positions_taken: {self.positions_taken}")
 
 
 class TradingBot:
@@ -62,6 +134,7 @@ class TradingBot:
         self._current_market: Optional[Dict[str, Any]] = None
         self._active_orders: Dict[str, Dict[str, Any]] = {}
         self._paper_state = PaperTradingState()
+        self._live_state = LiveTradingState()  # Live trading state
 
     @property
     def is_running(self) -> bool:
@@ -101,8 +174,12 @@ class TradingBot:
 
         self._running = True
 
-        # Reset paper trading state
+        # Reset trading state
         self._paper_state.reset()
+        self._live_state.reset()
+
+        mode = "PAPER" if self.settings.paper_trading else "LIVE"
+        logger.info(f"[{mode}] Bot started | Trigger: {self.settings.trigger_price} | Target: {self.settings.target} | SL: {self.settings.stoploss} | Size: {self.settings.order_size}")
 
         # Update database state
         await self._update_bot_state(
@@ -111,9 +188,7 @@ class TradingBot:
             current_market_id=market_id
         )
 
-        # Start the main trading loop
         self._task = asyncio.create_task(self._run_strategy(market_id))
-        logger.info(f"Trading bot started with market_id: {market_id}")
         return True, ""
 
     async def stop(self) -> bool:
@@ -172,44 +247,29 @@ class TradingBot:
 
                     # Check if market has expired - search for next market
                     if time_to_close <= 0:
-                        logger.info(f"[{self._timestamp()}] [BOT] Market expired: {market_title}")
-                        logger.info(f"[{self._timestamp()}] [BOT] Searching for next 5-minute market...")
-
                         # Reset state for new market
                         self._paper_state.reset()
-                        current_market_id = None  # Force auto-discovery for next market
-
-                        await self._update_bot_state(
-                            last_action="Market expired, searching for next..."
-                        )
+                        self._live_state.reset()
+                        current_market_id = None
+                        await self._update_bot_state(last_action="Market expired, searching...")
                         await asyncio.sleep(2)
                         continue
 
                     # Check if we switched to a new market
                     if self._current_market and (self._current_market.get("id") != market_id):
-                        logger.info(f"[{self._timestamp()}] [BOT] Switched to new market: {market_title}")
+                        logger.info(f"[{self._timestamp()}] [LIVE] New market: {market_title}")
                         self._paper_state.reset()
+                        self._live_state.reset()
 
                     self._current_market = market
-                    current_market_id = market_id  # Track for next iteration
-
-                    logger.info(f"[{self._timestamp()}] [BOT] Trading: {market_title} | {time_to_close:.1f} min left")
+                    current_market_id = market_id
 
                     await self._update_bot_state(
                         current_market_id=market_id,
                         last_action=f"Trading: {market_title}..."
                     )
 
-                    # For paper trading, trade immediately regardless of time threshold
-                    # For live trading, wait for time threshold
-                    if not self.settings.paper_trading and time_to_close > self.settings.time_threshold:
-                        await self._update_bot_state(
-                            last_action=f"{BotAction.WAITING.value} ({time_to_close:.1f} min to close)"
-                        )
-                        await asyncio.sleep(self.settings.position_check_interval)
-                        continue
-
-                    # Execute trading logic
+                    # Execute trading logic (no time threshold - trade immediately)
                     await self._execute_trading_logic(market)
 
                     # Monitor positions
@@ -286,8 +346,9 @@ class TradingBot:
         yes_token_id = yes_token.get("token_id")
         no_token_id = no_token.get("token_id")
 
-        # Use different strategy for paper trading
+        # Use different strategy for paper trading vs live trading
         if self.settings.paper_trading:
+            # PAPER TRADING - orders are simulated, not sent to Polymarket
             await self._execute_paper_trading_strategy(
                 market=market,
                 yes_token_id=yes_token_id,
@@ -295,44 +356,406 @@ class TradingBot:
             )
             return
 
-        # Live trading - original strategy
-        # Check current positions
-        positions = await self._get_positions_for_market(market)
+        # LIVE TRADING - real orders sent to Polymarket
+        await self._execute_live_trading_strategy(
+            market=market,
+            yes_token_id=yes_token_id,
+            no_token_id=no_token_id
+        )
 
-        await self._update_bot_state(last_action=BotAction.PLACING_ORDERS.value)
+    async def _execute_live_trading_strategy(
+        self,
+        market: Dict[str, Any],
+        yes_token_id: str,
+        no_token_id: str
+    ) -> None:
+        """
+        Simplified live trading strategy:
+        1. Entry: MARKET order when price >= TRIGGER_PRICE (0.75)
+        2. After fill: Place LIMIT sell at TARGET (0.99) and STOPLOSS (0.55)
+        3. Cancel unfilled orders before market close
+        4. NO BUYING when <= 10 seconds to expiry
+        5. FORCE SELL all positions when <= 5 seconds to expiry
+        """
+        # Config values
+        TRIGGER_PRICE = self.settings.trigger_price
+        STOPLOSS = self.settings.stoploss
+        TARGET = self.settings.target
+        ORDER_CANCEL_THRESHOLD = self.settings.order_cancel_threshold
+        NO_BUY_THRESHOLD = 10 / 60  # 10 seconds in minutes = 0.1667 - no buying below this
+        FORCE_CLOSE_THRESHOLD = 0 / 60  # 7 seconds in minutes = 0.0833 - force sell positions
+        max_positions = self.settings.max_positions_per_market
 
-        if not positions:
-            # No positions - place buy orders on both YES and NO
-            await self._place_order(
-                market=market,
-                token_id=yes_token_id,
-                side="buy",
-                price=self.settings.buy_price,
-                size=self.settings.order_size,
-                outcome="YES"
+        # Get fresh time to close
+        market_id = market.get("id") or market.get("conditionId")
+        time_to_close = await self.client.get_time_to_close(market_id)
+        if time_to_close is None:
+            time_to_close = market.get("time_to_close_minutes", 0)
+        market["time_to_close_minutes"] = time_to_close
+
+        # Get live prices
+        yes_price = await self.client.get_current_price(yes_token_id)
+        no_price = await self.client.get_current_price(no_token_id)
+
+        if yes_price is None or no_price is None:
+            logger.warning(f"[{self._timestamp()}] [LIVE] Could not get prices - YES: {yes_price}, NO: {no_price}")
+            return
+
+        # Get and display balance
+        balance = await self.client.get_balance()
+        balance_str = f"${balance:.2f}" if balance is not None else "N/A"
+
+        logger.info(f"[{self._timestamp()}] [LIVE] YES: {yes_price:.4f} | NO: {no_price:.4f} | Time: {time_to_close:.1f}m | Balance: {balance_str}")
+
+        # CRITICAL: Force close all positions when <= 5 seconds to expiry
+        if time_to_close <= FORCE_CLOSE_THRESHOLD:
+            await self._force_close_live_position(market, "5SEC_EXPIRY")
+            return
+
+        # Check if we need to cancel orders before market close
+        if time_to_close <= ORDER_CANCEL_THRESHOLD:
+            await self._handle_market_close_live(market)
+            return
+
+        # Check if we've reached max positions
+        if self._live_state.positions_taken >= max_positions:
+            logger.info(f"[{self._timestamp()}] [LIVE] Max positions reached ({self._live_state.positions_taken}/{max_positions}). Waiting for next market...")
+            await self._update_bot_state(
+                last_action=f"Max positions reached ({self._live_state.positions_taken}/{max_positions}). Waiting for next market..."
+            )
+            return
+
+        # Check if we have a position open (either filled or pending)
+        if self._live_state.position_open:
+            logger.debug(f"[{self._timestamp()}] [LIVE] Position is open, monitoring...")
+            await self._monitor_live_position(market)
+            return
+
+        # NO BUYING when <= 10 seconds to expiry
+        if time_to_close <= NO_BUY_THRESHOLD:
+            time_seconds = time_to_close * 60
+            logger.info(f"[{self._timestamp()}] [LIVE] No buying - only {time_seconds:.1f}s to expiry (< 10s)")
+            await self._update_bot_state(
+                last_action=f"[LIVE] No buying - {time_seconds:.1f}s to expiry"
+            )
+            return
+
+        # No position - look for entry signal (price >= trigger)
+        logger.info(f"[{self._timestamp()}] [LIVE] Looking for entry: YES={yes_price:.4f}, NO={no_price:.4f}, trigger={TRIGGER_PRICE}, positions={self._live_state.positions_taken}/{max_positions}")
+
+        await self._update_bot_state(
+            last_action=f"[LIVE] Watching for entry (>= {TRIGGER_PRICE}) | YES: {yes_price:.3f}, NO: {no_price:.3f}"
+        )
+
+        # Check YES side for entry signal
+        if yes_price >= TRIGGER_PRICE and yes_price < TARGET:
+            logger.info(f"[{self._timestamp()}] [LIVE] Entry signal triggered: YES @ {yes_price:.4f} >= {TRIGGER_PRICE}")
+            await self._place_live_entry(market=market, token_id=yes_token_id, side="YES", current_price=yes_price)
+            return
+
+        # Check NO side for entry signal
+        if no_price >= TRIGGER_PRICE and no_price < TARGET:
+            logger.info(f"[{self._timestamp()}] [LIVE] Entry signal triggered: NO @ {no_price:.4f} >= {TRIGGER_PRICE}")
+            await self._place_live_entry(market=market, token_id=no_token_id, side="NO", current_price=no_price)
+            return
+
+    async def _place_live_entry(
+        self,
+        market: Dict[str, Any],
+        token_id: str,
+        side: str,
+        current_price: float
+    ) -> None:
+        """Place a MARKET buy order (at current price + buffer to fill immediately)."""
+        TARGET = self.settings.target
+        STOPLOSS = self.settings.stoploss
+        MARKET_BUY_PRICE = min(round(current_price + 0.02, 2), 0.98)
+
+        order_id = await self._place_order(
+            market=market,
+            token_id=token_id,
+            side="buy",
+            price=MARKET_BUY_PRICE,
+            size=self.settings.order_size,
+            outcome=side
+        )
+
+        if order_id:
+            self._live_state.buy_order_id = order_id
+            self._live_state.entry_side = side
+            self._live_state.entry_token_id = token_id
+            self._live_state.entry_price = current_price
+            self._live_state.buy_filled = False  # Will be confirmed via positions API
+            self._live_state.position_open = True
+
+            logger.info(f"[{self._timestamp()}] [LIVE] BUY {side} @ {current_price:.4f} | Target: {TARGET} | SL: {STOPLOSS}")
+
+            await self._update_bot_state(
+                last_action=f"[LIVE] Waiting for position confirmation..."
             )
 
-            await self._place_order(
-                market=market,
-                token_id=no_token_id,
-                side="buy",
-                price=self.settings.buy_price,
-                size=self.settings.order_size,
-                outcome="NO"
+    async def _check_order_filled(self) -> bool:
+        """Check if buy order is filled using getOrder and getTrades APIs.
+        Also updates self._live_state.filled_size with actual filled quantity."""
+        if not self._live_state.buy_order_id:
+            logger.info(f"[{self._timestamp()}] [LIVE] No buy_order_id to check")
+            return False
+
+        order_id = self._live_state.buy_order_id
+        logger.info(f"[{self._timestamp()}] [LIVE] Checking order: {order_id[:20]}...")
+
+        # Method 1: Check order status via getOrder
+        try:
+            order = await self.client.get_order(order_id)
+            logger.info(f"[{self._timestamp()}] [LIVE] getOrder response: {order}")
+
+            if order:
+                status = order.get("status", "").upper()
+                size_matched = order.get("size_matched") or order.get("sizeMatched") or "0"
+                size_matched = float(size_matched)
+
+                logger.info(f"[{self._timestamp()}] [LIVE] Order status={status}, size_matched={size_matched}")
+
+                if status in ["FILLED", "MATCHED", "LIVE"] or size_matched > 0:
+                    # Store the actual filled size for selling later
+                    self._live_state.filled_size = size_matched
+                    logger.info(f"[{self._timestamp()}] [LIVE] Order FILLED! Size: {size_matched}")
+                    return True
+        except Exception as e:
+            logger.error(f"[{self._timestamp()}] [LIVE] getOrder error: {e}")
+
+        # Method 2: Check trades via getTrades
+        try:
+            trades = await self.client.get_trades()
+            logger.info(f"[{self._timestamp()}] [LIVE] getTrades returned {len(trades) if trades else 0} trades")
+
+            if trades:
+                for trade in trades:
+                    trade_order_id = trade.get("order_id") or trade.get("orderId") or trade.get("id")
+                    if trade_order_id == order_id:
+                        # Get size from trade if available
+                        trade_size = float(trade.get("size") or trade.get("amount") or self.settings.order_size)
+                        self._live_state.filled_size = trade_size
+                        logger.info(f"[{self._timestamp()}] [LIVE] Found matching trade! Size: {trade_size}")
+                        return True
+        except Exception as e:
+            logger.error(f"[{self._timestamp()}] [LIVE] getTrades error: {e}")
+
+        return False
+
+    def _calculate_stoploss_price(self, entry_price: float, stoploss_offset: float = 0.20) -> float:
+        """Calculate stoploss price. Simply: entry_price - offset."""
+        # Example: Buy at 0.80, offset 0.20 -> stoploss at 0.60
+        stoploss_price = entry_price - stoploss_offset
+        return max(round(stoploss_price, 2), 0.01)  # Min 0.01
+
+    async def _monitor_live_position(self, market: Dict[str, Any]) -> None:
+        """Monitor live position - track price for target and stoploss."""
+        TARGET = self.settings.target
+
+        # If buy not confirmed yet, check order status
+        if not self._live_state.buy_filled and self._live_state.buy_order_id:
+            logger.info(f"[{self._timestamp()}] [LIVE] Checking if order filled...")
+            is_filled = await self._check_order_filled()
+            if is_filled:
+                self._live_state.buy_filled = True
+                # Stoploss = entry_price - 0.20
+                stoploss_price = self._calculate_stoploss_price(self._live_state.entry_price, 0.20)
+                self._live_state.stoploss_price = stoploss_price
+                # Use soft stoploss (price monitoring) - no limit order
+                self._live_state.use_soft_stoploss = True
+                self._live_state.stoploss_order_placed = True
+                logger.info(f"[{self._timestamp()}] [LIVE] FILLED! Entry: {self._live_state.entry_price:.4f} | Soft SL: {stoploss_price:.4f} | Target: {TARGET}")
+
+                # Update trade status to FILLED and create position in database
+                market_id = market.get("id") or market.get("conditionId")
+                await self._update_trade_status(self._live_state.buy_order_id, OrderStatus.FILLED)
+                await self._update_live_position(
+                    market_id=market_id,
+                    token_id=self._live_state.entry_token_id,
+                    side="buy",
+                    price=self._live_state.entry_price,
+                    size=self._live_state.filled_size if self._live_state.filled_size > 0 else self.settings.order_size,
+                    outcome=self._live_state.entry_side
+                )
+            return
+
+        # Get current price
+        current_price = await self.client.get_current_price(self._live_state.entry_token_id)
+        if not current_price:
+            return
+
+        entry_price = self._live_state.entry_price
+        stoploss_price = getattr(self._live_state, 'stoploss_price', entry_price - 0.05)
+        pnl = (current_price - entry_price) * self.settings.order_size
+        pnl_pct = ((current_price - entry_price) / entry_price) * 100
+        time_to_close = market.get("time_to_close_minutes", 0)
+
+        await self._update_bot_state(
+            last_action=f"[LIVE] {self._live_state.entry_side}: {current_price:.4f} (${pnl:+.2f}) | SL: {stoploss_price:.2f} | {time_to_close:.1f}m"
+        )
+
+        # Check if price reached TARGET - market sell for profit
+        if current_price >= TARGET:
+            logger.info(f"[{self._timestamp()}] [LIVE] TARGET! Price {current_price:.4f} >= {TARGET}")
+            await self._market_sell(market, current_price, "TARGET")
+            return
+
+        # Check if price hit STOPLOSS - soft stoploss (price monitoring)
+        if current_price <= stoploss_price:
+            logger.info(f"[{self._timestamp()}] [LIVE] STOPLOSS! Price {current_price:.4f} <= {stoploss_price:.4f}")
+            await self._market_sell(market, current_price, "STOPLOSS")
+            return
+
+    async def _market_sell(self, market: Dict[str, Any], current_price: float, reason: str) -> None:
+        """Execute market sell order using actual token balance."""
+        import math
+
+        # Prevent repeated sell attempts (order might have gone through but returned error)
+        if self._live_state.sell_attempted:
+            # Check if we still have tokens - if not, the sell went through
+            actual_balance = await self.client.get_conditional_balance(self._live_state.entry_token_id)
+            if actual_balance is None or actual_balance < 0.1:
+                logger.info(f"[{self._timestamp()}] [LIVE] Previous sell appears to have succeeded (balance: {actual_balance}), closing position")
+                await self._close_live_position(f"{reason}_CONFIRMED")
+                return
+            logger.info(f"[{self._timestamp()}] [LIVE] Retrying sell (balance: {actual_balance})...")
+
+        # Mark that we're attempting a sell
+        self._live_state.sell_attempted = True
+
+        # Price slightly below current to fill immediately
+        sell_price = max(round(current_price - 0.02, 2), 0.01)
+
+        # Get actual conditional token balance (most accurate)
+        actual_balance = await self.client.get_conditional_balance(self._live_state.entry_token_id)
+
+        # Minimum order size for Polymarket
+        MIN_ORDER_SIZE = 0.1
+
+        if actual_balance and actual_balance >= MIN_ORDER_SIZE:
+            # Use actual balance, FLOOR to avoid "not enough balance" errors
+            # round() can round UP (4.9656 -> 4.97), but we need to round DOWN (4.9656 -> 4.96)
+            sell_size = math.floor(actual_balance * 100) / 100
+            logger.info(f"[{self._timestamp()}] [LIVE] Actual token balance: {actual_balance}, selling: {sell_size}")
+        elif actual_balance is not None and actual_balance < MIN_ORDER_SIZE:
+            # Balance too small to sell, close position without selling
+            logger.info(f"[{self._timestamp()}] [LIVE] Balance {actual_balance} too small to sell (min: {MIN_ORDER_SIZE}), closing position")
+            await self._close_live_position(f"{reason}_DUST")
+            return
+        else:
+            # Couldn't get balance, use filled_size
+            sell_size = self._live_state.filled_size if self._live_state.filled_size > 0 else self.settings.order_size
+            # Also floor the fallback size
+            sell_size = math.floor(sell_size * 100) / 100
+            logger.info(f"[{self._timestamp()}] [LIVE] Using filled_size: {sell_size}")
+
+        if sell_size < MIN_ORDER_SIZE:
+            logger.info(f"[{self._timestamp()}] [LIVE] Sell size {sell_size} too small (min: {MIN_ORDER_SIZE}), closing position")
+            await self._close_live_position(f"{reason}_DUST")
+            return
+
+        logger.info(f"[{self._timestamp()}] [LIVE] Market SELL {sell_size} @ {sell_price}")
+
+        sell_order_id = await self._place_order(
+            market=market,
+            token_id=self._live_state.entry_token_id,
+            side="sell",
+            price=sell_price,
+            size=sell_size,
+            outcome=self._live_state.entry_side
+        )
+
+        if sell_order_id:
+            pnl = (current_price - self._live_state.entry_price) * sell_size
+            logger.info(f"[{self._timestamp()}] [LIVE] {reason} - Sold {sell_size} @ {current_price:.4f} | P&L: ${pnl:+.2f}")
+
+            # Update trade status and position in database
+            market_id = market.get("id") or market.get("conditionId")
+            await self._update_trade_status(sell_order_id, OrderStatus.FILLED)
+            await self._update_live_position(
+                market_id=market_id,
+                token_id=self._live_state.entry_token_id,
+                side="sell",
+                price=current_price,
+                size=sell_size,
+                outcome=self._live_state.entry_side
+            )
+
+            await self._close_live_position(reason)
+        else:
+            logger.error(f"[{self._timestamp()}] [LIVE] Failed to sell!")
+
+    async def _close_live_position(self, reason: str) -> None:
+        """Close live position and update state."""
+        # Use the close_position method which properly resets state and increments counter
+        self._live_state.close_position()
+
+        max_positions = self.settings.max_positions_per_market
+        positions_taken = self._live_state.positions_taken
+
+        await self._update_bot_state(
+            last_action=f"[LIVE] [{reason}] Position closed | {positions_taken}/{max_positions}"
+        )
+        logger.info(f"[{self._timestamp()}] [LIVE] POSITION CLOSED: {reason} | Positions: {positions_taken}/{max_positions}")
+        logger.info(f"[{self._timestamp()}] [LIVE] State after close: position_open={self._live_state.position_open}")
+
+    async def _handle_market_close_live(self, market: Dict[str, Any]) -> None:
+        """Handle market close - cancel unfilled orders."""
+        time_to_close = market.get("time_to_close_minutes", 0)
+        logger.info(f"[{self._timestamp()}] [LIVE] Market closing in {time_to_close:.2f} min - handling open orders")
+
+        # Cancel unfilled buy order
+        if self._live_state.buy_order_id and not self._live_state.buy_filled:
+            logger.info(f"[{self._timestamp()}] [LIVE] Cancelling unfilled buy order: {self._live_state.buy_order_id}")
+            await self.client.cancel_order(self._live_state.buy_order_id)
+            self._live_state.buy_order_id = None
+
+        # If we have a position, let market settle
+        if self._live_state.position_open:
+            logger.info(f"[{self._timestamp()}] [LIVE] Position open at market close - will auto-settle at $1.00 if profitable")
+            await self._update_bot_state(
+                last_action=f"[LIVE] Market closing - position will auto-settle"
             )
         else:
-            # Check for filled buy orders and place corresponding sells
-            for position in positions:
-                if position.quantity > 0:
-                    # We have a position, place sell order at 0.5
-                    await self._place_order(
-                        market=market,
-                        token_id=position.token_id,
-                        side="sell",
-                        price=self.settings.sell_price,
-                        size=position.quantity,
-                        outcome=position.outcome
-                    )
+            await self._update_bot_state(
+                last_action=f"[LIVE] Market closing - no position"
+            )
+
+    async def _force_close_live_position(self, market: Dict[str, Any], reason: str) -> None:
+        """
+        Force close live position when <= 5 seconds to expiry.
+        Sells all open positions immediately at market price.
+        """
+        time_to_close = market.get("time_to_close_minutes", 0)
+        time_seconds = time_to_close * 60
+
+        logger.info(f"[{self._timestamp()}] [LIVE] FORCE CLOSE: {time_seconds:.1f}s to expiry - {reason}")
+
+        # Cancel any unfilled buy order first
+        if self._live_state.buy_order_id and not self._live_state.buy_filled:
+            logger.info(f"[{self._timestamp()}] [LIVE] Cancelling unfilled buy order: {self._live_state.buy_order_id}")
+            await self.client.cancel_order(self._live_state.buy_order_id)
+            self._live_state.buy_order_id = None
+
+        # Force sell if we have a filled position
+        if self._live_state.position_open and self._live_state.buy_filled:
+            current_price = await self.client.get_current_price(self._live_state.entry_token_id)
+            if current_price:
+                logger.info(f"[{self._timestamp()}] [LIVE] Force selling position at {current_price:.4f}")
+                await self._market_sell(market, current_price, reason)
+            else:
+                logger.warning(f"[{self._timestamp()}] [LIVE] Could not get price for force sell")
+                # Close position state anyway to prevent stuck state
+                await self._close_live_position(f"{reason}_NO_PRICE")
+        elif self._live_state.position_open:
+            # Position open but buy not filled - just close state
+            logger.info(f"[{self._timestamp()}] [LIVE] Position pending but not filled, closing state")
+            await self._close_live_position(f"{reason}_UNFILLED")
+
+        await self._update_bot_state(
+            last_action=f"[LIVE] Force closed - {time_seconds:.1f}s to expiry"
+        )
 
     async def _execute_paper_trading_strategy(
         self,
@@ -341,17 +764,22 @@ class TradingBot:
         no_token_id: str
     ) -> None:
         """
-        Paper trading strategy:
-        1. Entry: Buy when price >= 0.80
-        2. Stop Loss: Exit when price drops to 0.50-0.55 range
-        3. Target: Exit when price reaches 0.98-1.0 range
-        4. Re-entry: After position closes, look for new signal if time >= 30 seconds
+        Paper trading strategy (UNIFIED with live trading):
+        1. Entry: Buy when price >= trigger_price (0.75) and < target
+        2. Stop Loss: Exit when price drops to entry_price - 0.20 (soft stoploss)
+        3. Target: Exit when price reaches target (0.99)
+        4. Re-entry: After position closes, immediately look for new signal if time permits
+        5. NO BUYING when <= 10 seconds to expiry
+        6. FORCE SELL all positions when <= 5 seconds to expiry
         """
-        # Price levels
-        ENTRY_SIGNAL = 0.80      # Buy when price >= 0.80
-        STOPLOSS = 0.55          # Exit when price < 0.55
-        TARGET = 0.98            # Exit when price > 0.98
-        MIN_TIME_FOR_ENTRY = 0.167  # 10 seconds = 0.167 minutes
+        # Price levels from config (same as live trading)
+        TRIGGER_PRICE = self.settings.trigger_price
+        STOPLOSS = self.settings.stoploss
+        TARGET = self.settings.target
+        ORDER_CANCEL_THRESHOLD = self.settings.order_cancel_threshold
+        NO_BUY_THRESHOLD = 10 / 60  # 10 seconds in minutes = 0.1667 - no buying below this
+        FORCE_CLOSE_THRESHOLD = 5 / 60  # 5 seconds in minutes = 0.0833 - force sell positions
+        max_positions = self.settings.max_positions_per_market
 
         # Get FRESH time to expiry (not stale from market dict)
         market_id = market.get("id") or market.get("conditionId")
@@ -373,148 +801,260 @@ class TradingBot:
         # ALWAYS log live prices with timestamp
         logger.info(f"[{self._timestamp()}] [PRICE] YES: {yes_price:.4f} | NO: {no_price:.4f} | Time left: {time_to_close:.2f} min")
 
-        # Check if we have a position
-        positions = await self._get_positions_for_market(market)
-        has_position = any(p.quantity > 0 for p in positions)
-
-        if has_position:
-            self._paper_state.position_open = True
-            # Monitor position for stoploss/target
-            await self._monitor_paper_position(
-                market, positions,
-                stoploss=STOPLOSS,
-                target=TARGET
-            )
+        # CRITICAL: Force close all positions when <= 5 seconds to expiry
+        if time_to_close <= FORCE_CLOSE_THRESHOLD:
+            await self._force_close_paper_position(market, "5SEC_EXPIRY")
             return
 
-        # No position - check if we can enter
-        if self._paper_state.position_open:
-            logger.info(f"[{self._timestamp()}] [PAPER] Position closed, looking for re-entry...")
-            self._paper_state.reset()
+        # Check if we need to cancel entry before market close (same as live trading)
+        if time_to_close <= ORDER_CANCEL_THRESHOLD:
+            await self._handle_market_close_paper(market)
+            return
 
-        # Check if enough time remaining for new entry (>= 10 seconds)
-        if time_to_close < MIN_TIME_FOR_ENTRY:
-            logger.info(f"[{self._timestamp()}] [PAPER] Not enough time for entry: {time_to_close:.2f} min < 0.17 min (10s)")
+        # Check if we've reached the maximum positions for this market
+        if self._paper_state.positions_taken >= max_positions:
+            logger.info(f"[{self._timestamp()}] [PAPER] Max positions reached ({self._paper_state.positions_taken}/{max_positions}). Waiting for next market...")
             await self._update_bot_state(
-                last_action=f"Waiting for next market (time left: {time_to_close:.1f} min)"
+                last_action=f"Max positions reached ({self._paper_state.positions_taken}/{max_positions}). Waiting for next market..."
             )
             return
 
-        # Watch for entry signal: Buy when price >= 0.80
+        # Check if we have a position open
+        if self._paper_state.position_open:
+            await self._monitor_paper_position_unified(market)
+            return
+
+        # NO BUYING when <= 10 seconds to expiry
+        if time_to_close <= NO_BUY_THRESHOLD:
+            time_seconds = time_to_close * 60
+            logger.info(f"[{self._timestamp()}] [PAPER] No buying - only {time_seconds:.1f}s to expiry (< 10s)")
+            await self._update_bot_state(
+                last_action=f"[PAPER] No buying - {time_seconds:.1f}s to expiry"
+            )
+            return
+
+        # No position - look for entry signal (price >= trigger_price)
         await self._update_bot_state(
-            last_action=f"{BotAction.PAPER_WATCHING.value} | YES: {yes_price:.3f}, NO: {no_price:.3f}"
+            last_action=f"[PAPER] Watching for entry (>= {TRIGGER_PRICE}) | YES: {yes_price:.3f}, NO: {no_price:.3f}"
         )
 
-        # Check YES side for entry signal (price >= 0.80)
-        if yes_price >= ENTRY_SIGNAL:
-            logger.info(f"[{self._timestamp()}] [PAPER] ✓ Entry signal: YES @ {yes_price:.4f} >= {ENTRY_SIGNAL}")
-            await self._place_paper_entry(
+        # Check YES side for entry signal (same logic as live trading)
+        if yes_price >= TRIGGER_PRICE and yes_price < TARGET:
+            logger.info(f"[{self._timestamp()}] [PAPER] Entry signal: YES @ {yes_price:.4f} (>= {TRIGGER_PRICE})")
+            await self._place_paper_entry_unified(
                 market=market,
                 token_id=yes_token_id,
                 side="YES",
-                price=yes_price
+                current_price=yes_price
             )
             return
 
-        # Check NO side for entry signal (price >= 0.80)
-        if no_price >= ENTRY_SIGNAL:
-            logger.info(f"[{self._timestamp()}] [PAPER] ✓ Entry signal: NO @ {no_price:.4f} >= {ENTRY_SIGNAL}")
-            await self._place_paper_entry(
+        # Check NO side for entry signal (same logic as live trading)
+        if no_price >= TRIGGER_PRICE and no_price < TARGET:
+            logger.info(f"[{self._timestamp()}] [PAPER] Entry signal: NO @ {no_price:.4f} (>= {TRIGGER_PRICE})")
+            await self._place_paper_entry_unified(
                 market=market,
                 token_id=no_token_id,
                 side="NO",
-                price=no_price
+                current_price=no_price
             )
             return
 
         # Log when waiting for signal
-        logger.debug(f"[{self._timestamp()}] [PAPER] Waiting for entry signal - need price >= {ENTRY_SIGNAL}")
+        if yes_price >= TARGET:
+            logger.debug(f"[{self._timestamp()}] [PAPER] YES price {yes_price:.4f} >= target {TARGET}, skipping")
+        elif no_price >= TARGET:
+            logger.debug(f"[{self._timestamp()}] [PAPER] NO price {no_price:.4f} >= target {TARGET}, skipping")
+        else:
+            logger.debug(f"[{self._timestamp()}] [PAPER] Waiting for entry signal - need price >= {TRIGGER_PRICE}")
 
-    async def _place_paper_entry(
+    async def _place_paper_entry_unified(
         self,
         market: Dict[str, Any],
         token_id: str,
         side: str,
-        price: float
+        current_price: float
     ) -> None:
-        """Place a paper trading entry order. Entry signal: price >= 0.80"""
-        ENTRY_SIGNAL = 0.80
+        """
+        Place a paper trading entry order (UNIFIED with live trading).
+        Entry signal: price >= trigger_price and < target
+        """
+        TRIGGER_PRICE = self.settings.trigger_price
+        TARGET = self.settings.target
 
-        # CHECK: Only buy if price >= entry signal
-        if price < ENTRY_SIGNAL:
-            logger.warning(f"[{self._timestamp()}] [PAPER] ✗ REJECTED: {side} @ {price:.4f} < {ENTRY_SIGNAL} (need >= {ENTRY_SIGNAL})")
+        # CHECK: Only buy if price is at or above trigger price
+        if current_price < TRIGGER_PRICE:
+            logger.warning(f"[{self._timestamp()}] [PAPER] REJECTED: {side} @ {current_price:.4f} < trigger {TRIGGER_PRICE}")
             return
 
-        order_id = await self._simulate_paper_order(
+        # CHECK: Don't buy if price is at or above target (no profit potential)
+        if current_price >= TARGET:
+            logger.warning(f"[{self._timestamp()}] [PAPER] REJECTED: {side} @ {current_price:.4f} >= target {TARGET}")
+            return
+
+        order_id = await self._simulate_paper_order_unified(
             market_id=market.get("id") or market.get("conditionId"),
             token_id=token_id,
             side="buy",
-            price=price,
+            price=current_price,
             size=self.settings.order_size,
             outcome=side
         )
 
         if order_id:
+            # Calculate stoploss price same as live trading (entry - 0.20)
+            stoploss_price = self._calculate_stoploss_price(current_price, 0.20)
+
             self._paper_state.position_open = True
-            self._paper_state.entry_price = price
+            self._paper_state.entry_price = current_price
             self._paper_state.entry_side = side
             self._paper_state.entry_token_id = token_id
-            await self._update_bot_state(
-                last_action=f"{BotAction.PAPER_BOUGHT.value}: {side} @ {price:.4f}"
-            )
-            logger.info(f"[{self._timestamp()}] [PAPER] ★ Position opened: {side} @ {price:.4f} | SL: <0.55 | Target: >0.98")
 
-    async def _monitor_paper_position(
+            logger.info(f"[{self._timestamp()}] [PAPER] BUY {side} @ {current_price:.4f} | Target: {TARGET} | SL: {stoploss_price:.4f}")
+
+            await self._update_bot_state(
+                last_action=f"[PAPER] Position opened: {side} @ {current_price:.4f}"
+            )
+
+    async def _monitor_paper_position_unified(self, market: Dict[str, Any]) -> None:
+        """
+        Monitor paper position (UNIFIED with live trading).
+        Uses soft stoploss (entry_price - 0.20) same as live trading.
+        """
+        TARGET = self.settings.target
+
+        # Get current price
+        current_price = await self.client.get_current_price(self._paper_state.entry_token_id)
+        if not current_price:
+            return
+
+        entry_price = self._paper_state.entry_price
+        stoploss_price = self._calculate_stoploss_price(entry_price, 0.20)
+        pnl = (current_price - entry_price) * self.settings.order_size
+        pnl_pct = ((current_price - entry_price) / entry_price) * 100 if entry_price > 0 else 0
+        time_to_close = market.get("time_to_close_minutes", 0)
+
+        await self._update_bot_state(
+            last_action=f"[PAPER] {self._paper_state.entry_side}: {current_price:.4f} (${pnl:+.2f}) | SL: {stoploss_price:.2f} | {time_to_close:.1f}m"
+        )
+
+        logger.info(f"[{self._timestamp()}] [MONITOR] {self._paper_state.entry_side}: {current_price:.4f} | Entry: {entry_price:.4f} | P&L: {pnl_pct:+.1f}% | Time: {time_to_close:.2f}m | SL: {stoploss_price:.4f} | Target: {TARGET}")
+
+        # Check if price reached TARGET - exit for profit
+        if current_price >= TARGET:
+            logger.info(f"[{self._timestamp()}] [PAPER] TARGET! Price {current_price:.4f} >= {TARGET}")
+            await self._exit_paper_position_unified(market, current_price, "TARGET")
+            return
+
+        # Check if price hit STOPLOSS - soft stoploss (same as live trading)
+        if current_price <= stoploss_price:
+            logger.info(f"[{self._timestamp()}] [PAPER] STOPLOSS! Price {current_price:.4f} <= {stoploss_price:.4f}")
+            await self._exit_paper_position_unified(market, current_price, "STOPLOSS")
+            return
+
+    async def _handle_market_close_paper(self, market: Dict[str, Any]) -> None:
+        """Handle market close for paper trading - close position if open."""
+        time_to_close = market.get("time_to_close_minutes", 0)
+        logger.info(f"[{self._timestamp()}] [PAPER] Market closing in {time_to_close:.2f} min")
+
+        # If we have a position, close it at current price (market will settle at $1.00)
+        if self._paper_state.position_open:
+            current_price = await self.client.get_current_price(self._paper_state.entry_token_id)
+            if current_price:
+                logger.info(f"[{self._timestamp()}] [PAPER] Market close - closing position at {current_price:.4f}")
+                await self._exit_paper_position_unified(market, current_price, "MARKET_CLOSE")
+            else:
+                await self._update_bot_state(
+                    last_action=f"[PAPER] Market closing - position will settle"
+                )
+        else:
+            await self._update_bot_state(
+                last_action=f"[PAPER] Market closing - no position"
+            )
+
+    async def _force_close_paper_position(self, market: Dict[str, Any], reason: str) -> None:
+        """
+        Force close paper position when <= 5 seconds to expiry.
+        Sells all open positions immediately at current price.
+        """
+        time_to_close = market.get("time_to_close_minutes", 0)
+        time_seconds = time_to_close * 60
+
+        logger.info(f"[{self._timestamp()}] [PAPER] FORCE CLOSE: {time_seconds:.1f}s to expiry - {reason}")
+
+        # Force sell if we have an open position
+        if self._paper_state.position_open:
+            current_price = await self.client.get_current_price(self._paper_state.entry_token_id)
+            if current_price:
+                logger.info(f"[{self._timestamp()}] [PAPER] Force selling position at {current_price:.4f}")
+                await self._exit_paper_position_unified(market, current_price, reason)
+            else:
+                logger.warning(f"[{self._timestamp()}] [PAPER] Could not get price for force sell")
+                # Close position state anyway to prevent stuck state
+                self._paper_state.close_position()
+
+        await self._update_bot_state(
+            last_action=f"[PAPER] Force closed - {time_seconds:.1f}s to expiry"
+        )
+
+    async def _exit_paper_position_unified(
         self,
         market: Dict[str, Any],
-        positions: List[Position],
-        stoploss: float = 0.55,
-        target: float = 0.98
+        exit_price: float,
+        reason: str
     ) -> None:
         """
-        Monitor paper position for stoploss/target exit.
-        - Target: exit when price > 0.98
-        - Stoploss: exit when price < 0.55
-        - Market close: If neither hit, close at market expiry as TARGET_1
+        Exit a paper position (UNIFIED with live trading).
+        Includes taker fees in P&L calculation.
         """
-        # Check time to market close
-        time_to_close = market.get("time_to_close_minutes", float("inf"))
-        MARKET_CLOSE_THRESHOLD = 0.1  # 6 seconds - close position before market ends
+        # Store values before reset
+        entry_price = self._paper_state.entry_price
+        entry_side = self._paper_state.entry_side
+        size = self.settings.order_size
 
-        for position in positions:
-            if position.quantity <= 0:
-                continue
+        # Calculate fees for display
+        buy_value = entry_price * size
+        sell_value = exit_price * size
+        buy_fee = self._calculate_taker_fee(buy_value)
+        sell_fee = self._calculate_taker_fee(sell_value)
+        total_fees = buy_fee + sell_fee
 
-            current_price = await self.client.get_current_price(position.token_id)
-            if current_price is None:
-                continue
+        # Calculate P&L
+        gross_pnl = (exit_price - entry_price) * size
+        net_pnl = gross_pnl - total_fees
+        net_pnl_pct = (net_pnl / buy_value) * 100 if buy_value > 0 else 0
 
-            pnl = (current_price - position.avg_price) * position.quantity
-            pnl_pct = ((current_price - position.avg_price) / position.avg_price) * 100 if position.avg_price > 0 else 0
+        order_id = await self._simulate_paper_order_unified(
+            market_id=market.get("id") or market.get("conditionId"),
+            token_id=self._paper_state.entry_token_id,
+            side="sell",
+            price=exit_price,
+            size=size,
+            outcome=entry_side
+        )
+
+        if order_id:
+            # Use close_position method which properly resets and increments counter
+            self._paper_state.close_position()
+
+            max_positions = self.settings.max_positions_per_market
+            positions_taken = self._paper_state.positions_taken
+
+            logger.info(f"[{self._timestamp()}] [PAPER] ══════════════════════════════════════")
+            logger.info(f"[{self._timestamp()}] [PAPER] POSITION CLOSED: {reason}")
+            logger.info(f"[{self._timestamp()}] [PAPER] Side: {entry_side}")
+            logger.info(f"[{self._timestamp()}] [PAPER] Entry: {entry_price:.4f}")
+            logger.info(f"[{self._timestamp()}] [PAPER] Exit: {exit_price:.4f}")
+            logger.info(f"[{self._timestamp()}] [PAPER] Gross P&L: {gross_pnl:+.4f}")
+            logger.info(f"[{self._timestamp()}] [PAPER] Fees: -{total_fees:.4f} (buy: {buy_fee:.4f}, sell: {sell_fee:.4f})")
+            logger.info(f"[{self._timestamp()}] [PAPER] Net P&L: {net_pnl:+.4f} ({net_pnl_pct:+.1f}%)")
+            logger.info(f"[{self._timestamp()}] [PAPER] Positions taken: {positions_taken}/{max_positions}")
+            logger.info(f"[{self._timestamp()}] [PAPER] State: position_open={self._paper_state.position_open}")
+            logger.info(f"[{self._timestamp()}] [PAPER] ══════════════════════════════════════")
 
             await self._update_bot_state(
-                last_action=f"{BotAction.PAPER_MONITORING.value} | {position.outcome}: {current_price:.4f} (P&L: {pnl_pct:+.1f}%) | {time_to_close:.1f}m left"
+                last_action=f"[{reason}] Closed @ {exit_price:.4f}, Net P&L: ${net_pnl:+.2f} | {positions_taken}/{max_positions}"
             )
-
-            logger.info(f"[{self._timestamp()}] [MONITOR] {position.outcome}: {current_price:.4f} | Entry: {position.avg_price:.4f} | P&L: {pnl_pct:+.1f}% | Time: {time_to_close:.2f}m | SL: <{stoploss} | Target: >{target}")
-
-            # Check target: exit when price > 0.98
-            if current_price > target:
-                logger.info(f"[{self._timestamp()}] [PAPER] ★ TARGET REACHED! {position.outcome} @ {current_price:.4f} > {target}")
-                await self._exit_paper_position(market, position, current_price, "TARGET")
-                return
-
-            # Check stoploss: exit when price < 0.55
-            if current_price < stoploss:
-                logger.info(f"[{self._timestamp()}] [PAPER] ✗ STOPLOSS HIT! {position.outcome} @ {current_price:.4f} < {stoploss}")
-                await self._exit_paper_position(market, position, current_price, "STOPLOSS")
-                return
-
-            # Check market close: exit before market ends, consider as TARGET_1
-            if time_to_close <= MARKET_CLOSE_THRESHOLD:
-                logger.info(f"[{self._timestamp()}] [PAPER] ◆ MARKET CLOSE - TARGET_1! {position.outcome} @ {current_price:.4f} | Time: {time_to_close:.2f}m")
-                await self._exit_paper_position(market, position, current_price, "TARGET_1")
-                return
 
     async def _exit_paper_position(
         self,
@@ -523,7 +1063,19 @@ class TradingBot:
         exit_price: float,
         reason: str
     ) -> None:
-        """Exit a paper position."""
+        """Exit a paper position. Includes taker fees in P&L calculation."""
+        # Calculate fees for display
+        buy_value = position.avg_price * position.quantity
+        sell_value = exit_price * position.quantity
+        buy_fee = self._calculate_taker_fee(buy_value)
+        sell_fee = self._calculate_taker_fee(sell_value)
+        total_fees = buy_fee + sell_fee
+
+        # Calculate P&L
+        gross_pnl = (exit_price - position.avg_price) * position.quantity
+        net_pnl = gross_pnl - total_fees
+        net_pnl_pct = (net_pnl / buy_value) * 100 if buy_value > 0 else 0
+
         order_id = await self._simulate_paper_order(
             market_id=market.get("id") or market.get("conditionId"),
             token_id=position.token_id,
@@ -534,18 +1086,22 @@ class TradingBot:
         )
 
         if order_id:
-            pnl = (exit_price - position.avg_price) * position.quantity
-            pnl_pct = ((exit_price - position.avg_price) / position.avg_price) * 100 if position.avg_price > 0 else 0
+            positions_taken = self._paper_state.positions_taken + 1  # Increment before reset
             self._paper_state.reset()  # Reset for next trade
+            self._paper_state.positions_taken = positions_taken  # Restore incremented count
+            max_positions = self.settings.max_positions_per_market
             await self._update_bot_state(
-                last_action=f"[{reason}] Sold {position.outcome} @ {exit_price:.4f}, P&L: {pnl:+.4f} ({pnl_pct:+.1f}%)"
+                last_action=f"[{reason}] Sold {position.outcome} @ {exit_price:.4f}, Net P&L: {net_pnl:+.4f} ({net_pnl_pct:+.1f}%) | Positions: {positions_taken}/{max_positions}"
             )
             logger.info(f"[{self._timestamp()}] [PAPER] ══════════════════════════════════════")
             logger.info(f"[{self._timestamp()}] [PAPER] POSITION CLOSED: {reason}")
             logger.info(f"[{self._timestamp()}] [PAPER] Side: {position.outcome}")
             logger.info(f"[{self._timestamp()}] [PAPER] Entry: {position.avg_price:.4f}")
             logger.info(f"[{self._timestamp()}] [PAPER] Exit: {exit_price:.4f}")
-            logger.info(f"[{self._timestamp()}] [PAPER] P&L: {pnl:+.4f} ({pnl_pct:+.1f}%)")
+            logger.info(f"[{self._timestamp()}] [PAPER] Gross P&L: {gross_pnl:+.4f}")
+            logger.info(f"[{self._timestamp()}] [PAPER] Fees: -{total_fees:.4f} (buy: {buy_fee:.4f}, sell: {sell_fee:.4f})")
+            logger.info(f"[{self._timestamp()}] [PAPER] Net P&L: {net_pnl:+.4f} ({net_pnl_pct:+.1f}%)")
+            logger.info(f"[{self._timestamp()}] [PAPER] Positions taken: {positions_taken}/{max_positions}")
             logger.info(f"[{self._timestamp()}] [PAPER] ══════════════════════════════════════")
 
     async def _monitor_positions(self, market: Dict[str, Any]) -> None:
@@ -557,9 +1113,15 @@ class TradingBot:
         2. Price target (0.98) - Sell positions
 
         Note: Paper trading has its own monitoring in _execute_paper_trading_strategy
+        Note: Live trading has its own monitoring in _monitor_live_position (stoploss orders)
         """
         # Paper trading handles its own position monitoring
         if self.settings.paper_trading:
+            return
+
+        # Live trading handles its own monitoring via _monitor_live_position
+        # which uses stoploss limit orders - skip duplicate monitoring here
+        if not self.settings.paper_trading:
             return
 
         positions = await self._get_positions_for_market(market)
@@ -645,13 +1207,13 @@ class TradingBot:
             existing = self._active_orders[order_key]
             # Skip if similar order already active
             if existing.get("status") in ["open", "pending"]:
+                logger.debug(f"[{self._timestamp()}] Skipping duplicate order: {order_key}")
                 return None
 
         # Check if paper trading is enabled
         is_paper = self.settings.paper_trading
 
         if is_paper:
-            # Paper trading - simulate the order
             order_id = await self._simulate_paper_order(
                 market_id=market_id,
                 token_id=token_id,
@@ -660,23 +1222,26 @@ class TradingBot:
                 size=size,
                 outcome=outcome
             )
-            if order_id:
-                logger.info(f"[PAPER] Placed {side} order for {outcome}: {size} @ {price}")
-                return order_id
-            return None
+            return order_id
 
-        # Live trading - place real order
+        # Live trading - place REAL order on Polymarket
+        market_options = await self.client.get_market_options(market_id)
+        tick_size = market_options.get("tick_size", "0.01")
+        neg_risk = market_options.get("neg_risk", False)
+
         result = await self.client.place_limit_order(
             token_id=token_id,
             side=side,
             price=price,
-            size=size
+            size=size,
+            tick_size=tick_size,
+            neg_risk=neg_risk
         )
 
         if result:
             order_id = result.get("orderID") or result.get("id")
+            logger.info(f"[{self._timestamp()}] [LIVE] ORDER: {side.upper()} {outcome} {size} @ {price}")
 
-            # Record in database
             await self._record_trade(
                 order_id=order_id,
                 market_id=market_id,
@@ -687,7 +1252,6 @@ class TradingBot:
                 is_paper=False
             )
 
-            # Track active order
             self._active_orders[order_key] = {
                 "order_id": order_id,
                 "status": "open",
@@ -695,10 +1259,18 @@ class TradingBot:
                 "size": size
             }
 
-            logger.info(f"Placed {side} order for {outcome}: {size} @ {price}")
             return order_id
+        else:
+            logger.error(f"[{self._timestamp()}] [LIVE] ORDER FAILED")
+            return None
 
-        return None
+    def _calculate_taker_fee(self, trade_value: float) -> float:
+        """
+        Calculate taker fee for a trade.
+        Fee = max(trade_value * fee_rate, min_fee)
+        """
+        fee = trade_value * self.settings.taker_fee_rate
+        return max(fee, self.settings.min_taker_fee)
 
     async def _simulate_paper_order(
         self,
@@ -709,48 +1281,45 @@ class TradingBot:
         size: float,
         outcome: str
     ) -> Optional[str]:
-        """Simulate a paper trade order. Entry signal: price >= 0.80"""
-        ENTRY_SIGNAL = 0.80
+        """
+        Simulate a paper trade order.
 
-        # CHECK: For buy orders, only allow if price >= entry signal
-        if side.lower() == "buy" and price < ENTRY_SIGNAL:
-            logger.warning(f"[{self._timestamp()}] [PAPER] ✗ ORDER REJECTED: Buy {outcome} @ {price:.4f} < {ENTRY_SIGNAL}")
+        Paper trading orders always fill immediately at the specified price
+        since we're simulating market orders at current prices.
+        Includes taker fee calculation (configurable).
+        """
+        ENTRY_MIN = self.settings.entry_min
+        ENTRY_MAX = self.settings.entry_max
+
+        # CHECK: For buy orders, only allow if price is in entry range
+        if side.lower() == "buy" and (price < ENTRY_MIN or price > ENTRY_MAX):
+            logger.warning(f"[{self._timestamp()}] [PAPER] ✗ ORDER REJECTED: Buy {outcome} @ {price:.4f} not in range {ENTRY_MIN}-{ENTRY_MAX}")
             return None
 
         # Generate a unique paper order ID
         order_id = f"paper_{uuid.uuid4().hex[:16]}"
 
-        # Get current market price to check if order would fill
-        current_price = await self.client.get_current_price(token_id)
-
-        # Determine if order fills immediately based on current price
-        order_fills = False
-        if current_price is not None:
-            if side.lower() == "buy" and current_price <= price:
-                order_fills = True
-            elif side.lower() == "sell" and current_price >= price:
-                order_fills = True
-
-        # Calculate cost for buy orders
-        cost = price * size
+        # Calculate cost and fee for the trade
+        trade_value = price * size
+        taker_fee = self._calculate_taker_fee(trade_value)
+        total_cost = trade_value + taker_fee  # Cost + fee for buys
 
         async with async_session_maker() as session:
             bot_state = await get_or_create_bot_state(session)
 
-            # Check if we have enough paper balance for buy orders
+            # Check if we have enough paper balance for buy orders (including fee)
             if side.lower() == "buy":
-                if bot_state.paper_balance < cost:
-                    logger.warning(f"[{self._timestamp()}] [PAPER] Insufficient balance: {bot_state.paper_balance:.2f} < {cost:.2f}")
+                if bot_state.paper_balance < total_cost:
+                    logger.warning(f"[{self._timestamp()}] [PAPER] Insufficient balance: {bot_state.paper_balance:.2f} < {total_cost:.2f} (cost: {trade_value:.2f} + fee: {taker_fee:.4f})")
                     return None
 
-                # Deduct from paper balance
-                bot_state.paper_balance -= cost
-                logger.info(f"[{self._timestamp()}] [PAPER] Deducted {cost:.4f} from balance. New balance: {bot_state.paper_balance:.4f}")
+                # Deduct cost + fee from paper balance
+                bot_state.paper_balance -= total_cost
+                logger.info(f"[{self._timestamp()}] [PAPER] Deducted {total_cost:.4f} (cost: {trade_value:.4f} + fee: {taker_fee:.4f}) from balance. New balance: {bot_state.paper_balance:.4f}")
 
             await session.commit()
 
-        # Record the paper trade
-        status = OrderStatus.FILLED if order_fills else OrderStatus.OPEN
+        # Record the paper trade - always FILLED for paper trading
         await self._record_trade(
             order_id=order_id,
             market_id=market_id,
@@ -759,25 +1328,24 @@ class TradingBot:
             price=price,
             size=size,
             is_paper=True,
-            status=status
+            status=OrderStatus.FILLED
         )
 
-        # If order fills, update position
-        if order_fills:
-            await self._update_paper_position(
-                market_id=market_id,
-                token_id=token_id,
-                side=side,
-                price=price,
-                size=size,
-                outcome=outcome
-            )
+        # Update position immediately since paper orders always fill
+        await self._update_paper_position(
+            market_id=market_id,
+            token_id=token_id,
+            side=side,
+            price=price,
+            size=size,
+            outcome=outcome
+        )
 
         # Track active order
         order_key = f"{token_id}_{side}"
         self._active_orders[order_key] = {
             "order_id": order_id,
-            "status": "filled" if order_fills else "open",
+            "status": "filled",
             "price": price,
             "size": size,
             "is_paper": True
@@ -785,7 +1353,80 @@ class TradingBot:
 
         return order_id
 
-    async def _update_paper_position(
+    async def _simulate_paper_order_unified(
+        self,
+        market_id: str,
+        token_id: str,
+        side: str,
+        price: float,
+        size: float,
+        outcome: str
+    ) -> Optional[str]:
+        """
+        Simulate a paper trade order (UNIFIED with live trading).
+        Uses trigger_price logic instead of entry_min/entry_max range.
+        Paper orders always fill immediately at the specified price.
+        """
+        TRIGGER_PRICE = self.settings.trigger_price
+        TARGET = self.settings.target
+
+        # CHECK: For buy orders, only allow if price >= trigger_price and < target
+        if side.lower() == "buy":
+            if price < TRIGGER_PRICE:
+                logger.warning(f"[{self._timestamp()}] [PAPER] ORDER REJECTED: Buy {outcome} @ {price:.4f} < trigger {TRIGGER_PRICE}")
+                return None
+            if price >= TARGET:
+                logger.warning(f"[{self._timestamp()}] [PAPER] ORDER REJECTED: Buy {outcome} @ {price:.4f} >= target {TARGET}")
+                return None
+
+        # Generate a unique paper order ID
+        order_id = f"paper_{uuid.uuid4().hex[:16]}"
+
+        # Calculate cost and fee for the trade
+        trade_value = price * size
+        taker_fee = self._calculate_taker_fee(trade_value)
+        total_cost = trade_value + taker_fee  # Cost + fee for buys
+
+        async with async_session_maker() as session:
+            bot_state = await get_or_create_bot_state(session)
+
+            # Check if we have enough paper balance for buy orders (including fee)
+            if side.lower() == "buy":
+                if bot_state.paper_balance < total_cost:
+                    logger.warning(f"[{self._timestamp()}] [PAPER] Insufficient balance: {bot_state.paper_balance:.2f} < {total_cost:.2f}")
+                    return None
+
+                # Deduct cost + fee from paper balance
+                bot_state.paper_balance -= total_cost
+                logger.info(f"[{self._timestamp()}] [PAPER] Deducted {total_cost:.4f} from balance. New balance: {bot_state.paper_balance:.4f}")
+
+            await session.commit()
+
+        # Record the paper trade - always FILLED for paper trading
+        await self._record_trade(
+            order_id=order_id,
+            market_id=market_id,
+            token_id=token_id,
+            side=side,
+            price=price,
+            size=size,
+            is_paper=True,
+            status=OrderStatus.FILLED
+        )
+
+        # Update position immediately since paper orders always fill
+        await self._update_paper_position_unified(
+            market_id=market_id,
+            token_id=token_id,
+            side=side,
+            price=price,
+            size=size,
+            outcome=outcome
+        )
+
+        return order_id
+
+    async def _update_paper_position_unified(
         self,
         market_id: str,
         token_id: str,
@@ -794,7 +1435,10 @@ class TradingBot:
         size: float,
         outcome: str
     ) -> None:
-        """Update paper trading position after a fill."""
+        """
+        Update paper trading position after a fill (UNIFIED version).
+        Includes taker fee in P&L calculation for both buy and sell sides.
+        """
         async with async_session_maker() as session:
             # Find existing position
             result = await session.execute(
@@ -828,23 +1472,114 @@ class TradingBot:
 
             elif side.lower() == "sell":
                 if position and position.quantity >= size:
-                    # Calculate P&L
-                    pnl = (price - position.avg_price) * size
+                    # Calculate fees for P&L
+                    buy_value = position.avg_price * size
+                    sell_value = price * size
+                    buy_fee = self._calculate_taker_fee(buy_value)
+                    sell_fee = self._calculate_taker_fee(sell_value)
+                    total_fees = buy_fee + sell_fee
+
+                    # Calculate P&L including fees
+                    gross_pnl = (price - position.avg_price) * size
+                    net_pnl = gross_pnl - total_fees
+
                     position.quantity -= size
-                    position.current_pnl += pnl
+                    position.current_pnl += net_pnl
                     position.updated_at = datetime.utcnow()
 
                     # Update bot state
-                    bot_state.total_pnl += pnl
-                    bot_state.paper_balance += price * size  # Add proceeds
+                    bot_state.total_pnl += net_pnl
+                    # Add proceeds minus sell fee to balance
+                    net_proceeds = sell_value - sell_fee
+                    bot_state.paper_balance += net_proceeds
                     bot_state.trades_count += 1
 
-                    if pnl > 0:
+                    if net_pnl > 0:
                         bot_state.wins += 1
                     else:
                         bot_state.losses += 1
 
-                    logger.info(f"[{self._timestamp()}] [PAPER] Sold {size} {outcome} @ {price:.4f}, P&L: {pnl:.4f}")
+                    logger.info(f"[{self._timestamp()}] [PAPER] Sold {size} {outcome} @ {price:.4f} | Net P&L: {net_pnl:+.4f}")
+
+            await session.commit()
+
+    async def _update_paper_position(
+        self,
+        market_id: str,
+        token_id: str,
+        side: str,
+        price: float,
+        size: float,
+        outcome: str
+    ) -> None:
+        """
+        Update paper trading position after a fill.
+        Includes taker fee in P&L calculation for both buy and sell sides.
+        """
+        async with async_session_maker() as session:
+            # Find existing position
+            result = await session.execute(
+                select(Position).where(Position.token_id == token_id)
+            )
+            position = result.scalar_one_or_none()
+
+            bot_state = await get_or_create_bot_state(session)
+
+            if side.lower() == "buy":
+                if position:
+                    # Update existing position with average price
+                    total_cost = (position.avg_price * position.quantity) + (price * size)
+                    new_quantity = position.quantity + size
+                    position.avg_price = total_cost / new_quantity
+                    position.quantity = new_quantity
+                    position.updated_at = datetime.utcnow()
+                else:
+                    # Create new position
+                    position = Position(
+                        market_id=market_id,
+                        token_id=token_id,
+                        outcome=outcome,
+                        quantity=size,
+                        avg_price=price,
+                        current_price=price
+                    )
+                    session.add(position)
+
+                bot_state.trades_count += 1
+
+            elif side.lower() == "sell":
+                if position and position.quantity >= size:
+                    # Calculate fees for P&L
+                    buy_value = position.avg_price * size
+                    sell_value = price * size
+                    buy_fee = self._calculate_taker_fee(buy_value)
+                    sell_fee = self._calculate_taker_fee(sell_value)
+                    total_fees = buy_fee + sell_fee
+
+                    # Calculate P&L including fees
+                    # Gross P&L = (sell_price - buy_price) * size
+                    # Net P&L = Gross P&L - buy_fee - sell_fee
+                    gross_pnl = (price - position.avg_price) * size
+                    net_pnl = gross_pnl - total_fees
+
+                    position.quantity -= size
+                    position.current_pnl += net_pnl
+                    position.updated_at = datetime.utcnow()
+
+                    # Update bot state
+                    bot_state.total_pnl += net_pnl
+                    # Add proceeds minus sell fee to balance
+                    net_proceeds = sell_value - sell_fee
+                    bot_state.paper_balance += net_proceeds
+                    bot_state.trades_count += 1
+
+                    if net_pnl > 0:
+                        bot_state.wins += 1
+                    else:
+                        bot_state.losses += 1
+
+                    logger.info(f"[{self._timestamp()}] [PAPER] Sold {size} {outcome} @ {price:.4f}")
+                    logger.info(f"[{self._timestamp()}] [PAPER] Gross P&L: {gross_pnl:+.4f} | Fees: -{total_fees:.4f} (buy: {buy_fee:.4f}, sell: {sell_fee:.4f}) | Net P&L: {net_pnl:+.4f}")
 
             await session.commit()
 
@@ -872,6 +1607,86 @@ class TradingBot:
                 is_paper=is_paper
             )
             session.add(trade)
+            await session.commit()
+
+    async def _update_trade_status(self, order_id: str, status: OrderStatus) -> None:
+        """Update the status of a trade by order_id."""
+        async with async_session_maker() as session:
+            result = await session.execute(
+                select(Trade).where(Trade.order_id == order_id)
+            )
+            trade = result.scalar_one_or_none()
+            if trade:
+                trade.status = status
+                trade.updated_at = datetime.utcnow()
+                await session.commit()
+                logger.info(f"[{self._timestamp()}] [LIVE] Trade {order_id[:16]}... status updated to {status.value}")
+
+    async def _update_live_position(
+        self,
+        market_id: str,
+        token_id: str,
+        side: str,
+        price: float,
+        size: float,
+        outcome: str
+    ) -> None:
+        """
+        Update position for live trading after a fill.
+        Similar to _update_paper_position but for live trades.
+        """
+        async with async_session_maker() as session:
+            # Find existing position
+            result = await session.execute(
+                select(Position).where(Position.token_id == token_id)
+            )
+            position = result.scalar_one_or_none()
+
+            bot_state = await get_or_create_bot_state(session)
+
+            if side.lower() == "buy":
+                if position:
+                    # Update existing position with average price
+                    total_cost = (position.avg_price * position.quantity) + (price * size)
+                    new_quantity = position.quantity + size
+                    position.avg_price = total_cost / new_quantity
+                    position.quantity = new_quantity
+                    position.updated_at = datetime.utcnow()
+                else:
+                    # Create new position
+                    position = Position(
+                        market_id=market_id,
+                        token_id=token_id,
+                        outcome=outcome,
+                        quantity=size,
+                        avg_price=price,
+                        current_price=price
+                    )
+                    session.add(position)
+
+                bot_state.trades_count += 1
+                logger.info(f"[{self._timestamp()}] [LIVE] Position created/updated: BUY {size} {outcome} @ {price:.4f}")
+
+            elif side.lower() == "sell":
+                if position and position.quantity >= size:
+                    # Calculate P&L
+                    gross_pnl = (price - position.avg_price) * size
+
+                    position.quantity -= size
+                    position.current_pnl += gross_pnl
+                    position.updated_at = datetime.utcnow()
+
+                    # Update bot state
+                    bot_state.total_pnl += gross_pnl
+                    bot_state.trades_count += 1
+
+                    if gross_pnl > 0:
+                        bot_state.wins += 1
+                    else:
+                        bot_state.losses += 1
+
+                    logger.info(f"[{self._timestamp()}] [LIVE] Position updated: SELL {size} {outcome} @ {price:.4f} | P&L: {gross_pnl:+.4f}")
+
             await session.commit()
 
     async def _get_positions_for_market(self, market: Dict[str, Any]) -> List[Position]:
@@ -936,6 +1751,15 @@ class TradingBot:
                     bot_state.current_market_id
                 )
 
+            # The ACTUAL trading mode is determined by config, not database
+            config_paper_trading = self.settings.paper_trading
+            trading_mode = "PAPER (Simulated)" if config_paper_trading else "LIVE (Real Money)"
+
+            # Get live balance from Polymarket
+            live_balance = None
+            if self.client and self.client.is_connected and not config_paper_trading:
+                live_balance = await self.client.get_balance()
+
             return {
                 "is_running": bot_state.is_running,
                 "current_market_id": bot_state.current_market_id,
@@ -946,9 +1770,11 @@ class TradingBot:
                 "losses": bot_state.losses,
                 "updated_at": bot_state.updated_at,
                 "time_to_close": time_to_close,
-                "paper_trading": bot_state.paper_trading,
+                "paper_trading": config_paper_trading,
+                "trading_mode": trading_mode,
                 "paper_balance": bot_state.paper_balance,
-                "paper_starting_balance": bot_state.paper_starting_balance
+                "paper_starting_balance": bot_state.paper_starting_balance,
+                "live_balance": live_balance
             }
 
     async def set_paper_trading(self, enabled: bool) -> None:

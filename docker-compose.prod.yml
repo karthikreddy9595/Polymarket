@@ -1,12 +1,30 @@
-# Production override file
-# Usage: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+# Production Docker Compose Configuration
+#
+# Usage:
+#   Build and start: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#   View logs:       docker compose logs -f
+#   Stop:            docker compose down
+#   Stop & cleanup:  docker compose down -v
+#
+# Ports:
+#   - Backend API: http://localhost:5000
+#   - Frontend:    http://localhost:9000
 
 services:
   backend:
     image: polymarket-bot-backend:latest
+    container_name: polymarket-bot-backend
     environment:
-      - LOG_LEVEL=INFO
-      - PAPER_TRADING=false
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - PAPER_TRADING=${PAPER_TRADING:-false}
+      - USE_TESTNET=${USE_TESTNET:-false}
+      - CHAIN_ID=${CHAIN_ID:-137}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
     deploy:
       resources:
         limits:
@@ -18,11 +36,18 @@ services:
       restart_policy:
         condition: on-failure
         delay: 5s
-        max_attempts: 3
+        max_attempts: 5
         window: 120s
 
   frontend:
     image: polymarket-bot-frontend:latest
+    container_name: polymarket-bot-frontend
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
     deploy:
       resources:
         limits:
@@ -34,17 +59,20 @@ services:
       restart_policy:
         condition: on-failure
         delay: 5s
-        max_attempts: 3
+        max_attempts: 5
         window: 120s
 
-  # Optional: Traefik reverse proxy for SSL/TLS
-  # Uncomment below to enable HTTPS with Let's Encrypt
+  # ===========================================
+  # Optional: Traefik Reverse Proxy for HTTPS
+  # ===========================================
+  # Uncomment to enable HTTPS with Let's Encrypt
+  # Requires: DOMAIN and ACME_EMAIL in .env
   #
   # traefik:
   #   image: traefik:v3.0
   #   container_name: polymarket-traefik
   #   command:
-  #     - "--api.dashboard=true"
+  #     - "--api.dashboard=false"
   #     - "--providers.docker=true"
   #     - "--providers.docker.exposedbydefault=false"
   #     - "--entrypoints.web.address=:80"
@@ -63,14 +91,15 @@ services:
   #     - polymarket-network
   #   restart: unless-stopped
   #
-  # Then add labels to frontend service:
+  # When using Traefik, add these labels to frontend service:
   #   labels:
   #     - "traefik.enable=true"
   #     - "traefik.http.routers.polymarket.rule=Host(`${DOMAIN}`)"
   #     - "traefik.http.routers.polymarket.entrypoints=websecure"
   #     - "traefik.http.routers.polymarket.tls.certresolver=letsencrypt"
-  #     - "traefik.http.services.polymarket.loadbalancer.server.port=3000"
+  #     - "traefik.http.services.polymarket.loadbalancer.server.port=9000"
 
+# Uncomment if using Traefik:
 # volumes:
 #   traefik-certs:
 #     name: polymarket-traefik-certs

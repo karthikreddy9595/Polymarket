@@ -1,15 +1,26 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { History, ChevronLeft, ChevronRight } from 'lucide-react';
-import { getTrades } from '../services/api';
+import { getTrades, getBotStatus } from '../services/api';
 
 export default function TradeHistory() {
   const [page, setPage] = useState(1);
   const pageSize = 10;
 
+  // Get current market ID from bot status
+  const { data: botStatus } = useQuery({
+    queryKey: ['botStatus'],
+    queryFn: getBotStatus,
+    refetchInterval: 2000,
+  });
+
+  const currentMarketId = botStatus?.current_market_id;
+
+  // Show trades from completed markets (exclude current market)
   const { data, isLoading } = useQuery({
-    queryKey: ['trades', page, pageSize],
-    queryFn: () => getTrades(page, pageSize),
+    queryKey: ['trades', page, pageSize, currentMarketId],
+    queryFn: () => getTrades(page, pageSize, undefined, currentMarketId || undefined),
+    refetchInterval: 3000, // Refresh every 3 seconds
   });
 
   const totalPages = data ? Math.ceil(data.total / pageSize) : 0;

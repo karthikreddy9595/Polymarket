@@ -460,12 +460,12 @@ function Analysis({ onBack }: AnalysisProps) {
                     </td>
                   </tr>
                 ) : (
-                  trades.map((trade, index) => (
+                  [...trades].reverse().map((trade, index) => (
                     <tr
                       key={index}
                       className="border-b border-gray-700 hover:bg-gray-750"
                     >
-                      <td className="py-3 px-4 text-gray-500">{index + 1}</td>
+                      <td className="py-3 px-4 text-gray-500">{trades.length - index}</td>
                       <td className="py-3 px-4 text-gray-300">{trade.timestamp}</td>
                       <td className="py-3 px-4">
                         <span className={`px-2 py-1 rounded text-xs font-medium ${

@@ -13,6 +13,8 @@ from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..database import get_db, Trade, BotState, Position, Side, OrderStatus
+from ..config import get_settings
+from ..polymarket_client import get_polymarket_client
 
 router = APIRouter(prefix="/api/analysis", tags=["analysis"])
 
@@ -125,12 +127,24 @@ async def get_analysis(
     security: Optional[str] = Query(None, description="Filter by security (Up/Down)")
 ):
     """Get comprehensive trade analysis with quant metrics."""
+    settings = get_settings()
+
     # Get bot state for starting balance
     result = await db.execute(select(BotState).limit(1))
     bot_state = result.scalar_one_or_none()
 
     starting_equity = bot_state.paper_starting_balance if bot_state else 1000.0
-    current_equity = bot_state.paper_balance if bot_state else starting_equity
+
+    # Use live balance from Polymarket when in live trading mode
+    if not settings.paper_trading:
+        client = await get_polymarket_client()
+        if client.is_connected:
+            live_balance = await client.get_balance()
+            current_equity = live_balance if live_balance is not None else starting_equity
+        else:
+            current_equity = starting_equity
+    else:
+        current_equity = bot_state.paper_balance if bot_state else starting_equity
 
     # Build query with filters
     query = select(Trade).where(Trade.status == OrderStatus.FILLED)
@@ -285,6 +299,8 @@ async def get_quick_summary(
     db: AsyncSession = Depends(get_db)
 ):
     """Get quick summary stats."""
+    settings = get_settings()
+
     result = await db.execute(select(BotState).limit(1))
     bot_state = result.scalar_one_or_none()
 
@@ -298,6 +314,17 @@ async def get_quick_summary(
             "current_balance": 1000.0
         }
 
+    # Use live balance when in live trading mode
+    if not settings.paper_trading:
+        client = await get_polymarket_client()
+        if client.is_connected:
+            live_balance = await client.get_balance()
+            current_balance = live_balance if live_balance is not None else bot_state.paper_balance
+        else:
+            current_balance = bot_state.paper_balance
+    else:
+        current_balance = bot_state.paper_balance
+
     total = bot_state.wins + bot_state.losses
     win_rate = (bot_state.wins / total * 100) if total > 0 else 0
 
@@ -307,7 +334,7 @@ async def get_quick_summary(
         "losses": bot_state.losses,
         "win_rate": round(win_rate, 2),
         "total_pnl": round(bot_state.total_pnl, 4),
-        "current_balance": round(bot_state.paper_balance, 4)
+        "current_balance": round(current_balance, 4)
     }
 
 
@@ -319,10 +346,22 @@ async def export_trades(
     format: str = Query("csv", description="Export format: csv or xlsx")
 ):
     """Export trade data to CSV/Excel."""
+    settings = get_settings()
+
     # Get bot state for starting balance
     result = await db.execute(select(BotState).limit(1))
     bot_state = result.scalar_one_or_none()
-    starting_equity = bot_state.paper_starting_balance if bot_state else 1000.0
+
+    # Use live balance for starting equity when in live trading mode
+    if not settings.paper_trading:
+        client = await get_polymarket_client()
+        if client.is_connected:
+            live_balance = await client.get_balance()
+            starting_equity = live_balance if live_balance is not None else (bot_state.paper_starting_balance if bot_state else 1000.0)
+        else:
+            starting_equity = bot_state.paper_starting_balance if bot_state else 1000.0
+    else:
+        starting_equity = bot_state.paper_starting_balance if bot_state else 1000.0
 
     # Build query with filters
     query = select(Trade).where(Trade.status == OrderStatus.FILLED)

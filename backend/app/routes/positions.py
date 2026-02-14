@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..database import get_db, Position, Trade, BotState, get_or_create_bot_state
+from ..database import get_db, Position, Trade, BotState, OrderStatus, get_or_create_bot_state
 from ..models.schemas import PositionResponse, PnLSummary
 
 router = APIRouter(prefix="/api/positions", tags=["positions"])
@@ -42,7 +42,7 @@ async def get_pnl_summary(
 
     # Calculate realized P&L from closed trades
     realized_query = select(func.sum(Trade.pnl)).where(
-        Trade.status.in_(["filled", "closed"])
+        Trade.status == OrderStatus.FILLED
     )
     realized_result = await db.execute(realized_query)
     realized_pnl = realized_result.scalar() or 0.0

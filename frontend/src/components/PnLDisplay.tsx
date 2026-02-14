@@ -6,6 +6,7 @@ export default function PnLDisplay() {
   const { data: pnl, isLoading } = useQuery({
     queryKey: ['pnl'],
     queryFn: getPnLSummary,
+    refetchInterval: 2000, // Refresh every 2 seconds
   });
 
   if (isLoading) {
