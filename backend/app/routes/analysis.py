@@ -1,10 +1,13 @@
 """Trade analysis endpoints with quant metrics."""
 
 from typing import List, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 import math
+import csv
+import io
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -115,7 +118,11 @@ def calculate_max_drawdown(equity_curve: List[float]) -> tuple:
 
 @router.get("", response_model=AnalysisResponse)
 async def get_analysis(
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
+    last_n_trades: Optional[int] = Query(None, description="Get last N trades only"),
+    security: Optional[str] = Query(None, description="Filter by security (Up/Down)")
 ):
     """Get comprehensive trade analysis with quant metrics."""
     # Get bot state for starting balance
@@ -125,12 +132,25 @@ async def get_analysis(
     starting_equity = bot_state.paper_starting_balance if bot_state else 1000.0
     current_equity = bot_state.paper_balance if bot_state else starting_equity
 
-    # Get all filled trades ordered by timestamp
-    result = await db.execute(
-        select(Trade)
-        .where(Trade.status == OrderStatus.FILLED)
-        .order_by(Trade.created_at)
-    )
+    # Build query with filters
+    query = select(Trade).where(Trade.status == OrderStatus.FILLED)
+
+    if start_date:
+        try:
+            start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+            query = query.where(Trade.created_at >= start_dt)
+        except ValueError:
+            pass
+
+    if end_date:
+        try:
+            end_dt = datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)
+            query = query.where(Trade.created_at < end_dt)
+        except ValueError:
+            pass
+
+    query = query.order_by(Trade.created_at)
+    result = await db.execute(query)
     all_trades = list(result.scalars().all())
 
     # Get all positions to map token_id to outcome
@@ -289,3 +309,95 @@ async def get_quick_summary(
         "total_pnl": round(bot_state.total_pnl, 4),
         "current_balance": round(bot_state.paper_balance, 4)
     }
+
+
+@router.get("/export")
+async def export_trades(
+    db: AsyncSession = Depends(get_db),
+    start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
+    format: str = Query("csv", description="Export format: csv or xlsx")
+):
+    """Export trade data to CSV/Excel."""
+    # Get bot state for starting balance
+    result = await db.execute(select(BotState).limit(1))
+    bot_state = result.scalar_one_or_none()
+    starting_equity = bot_state.paper_starting_balance if bot_state else 1000.0
+
+    # Build query with filters
+    query = select(Trade).where(Trade.status == OrderStatus.FILLED)
+
+    if start_date:
+        try:
+            start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+            query = query.where(Trade.created_at >= start_dt)
+        except ValueError:
+            pass
+
+    if end_date:
+        try:
+            end_dt = datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)
+            query = query.where(Trade.created_at < end_dt)
+        except ValueError:
+            pass
+
+    query = query.order_by(Trade.created_at)
+    result = await db.execute(query)
+    all_trades = list(result.scalars().all())
+
+    # Get positions for outcome mapping
+    result = await db.execute(select(Position))
+    all_positions = list(result.scalars().all())
+    token_to_outcome = {p.token_id: p.outcome for p in all_positions}
+
+    # Process trades into rows
+    rows = []
+    open_positions = {}
+    cumulative_profit = 0.0
+    equity = starting_equity
+
+    for trade in all_trades:
+        token_id = trade.token_id
+
+        if trade.side == Side.BUY:
+            outcome = token_to_outcome.get(token_id, "Up")
+            open_positions[token_id] = (trade, outcome)
+        elif trade.side == Side.SELL:
+            if token_id in open_positions:
+                buy_trade, outcome = open_positions[token_id]
+                del open_positions[token_id]
+
+                pnl = (trade.price - buy_trade.price) * trade.size
+                cumulative_profit += pnl
+                equity += pnl
+
+                rows.append({
+                    "Timestamp": trade.created_at.strftime("%Y-%m-%d %H:%M:%S"),
+                    "Security": outcome,
+                    "Buy Price": round(buy_trade.price, 4),
+                    "Sell Price": round(trade.price, 4),
+                    "Size": round(trade.size, 4),
+                    "P&L": round(pnl, 4),
+                    "Cumulative P&L": round(cumulative_profit, 4),
+                    "Equity": round(equity, 4),
+                    "Result": "WIN" if pnl > 0 else "LOSS"
+                })
+
+    # Generate CSV
+    output = io.StringIO()
+    if rows:
+        writer = csv.DictWriter(output, fieldnames=rows[0].keys())
+        writer.writeheader()
+        writer.writerows(rows)
+    else:
+        output.write("No trades found")
+
+    output.seek(0)
+
+    filename = f"trades_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )

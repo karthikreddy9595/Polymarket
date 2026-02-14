@@ -40,10 +40,10 @@ RUN addgroup -g 1001 -S nginx-user && \
     touch /var/run/nginx.pid && chown nginx-user:nginx-user /var/run/nginx.pid
 
 # Expose port
-EXPOSE 3000
+EXPOSE 9000
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:3000/ || exit 1
+    CMD curl -f http://localhost:9000/ || exit 1
 
 CMD ["nginx", "-g", "daemon off;"]

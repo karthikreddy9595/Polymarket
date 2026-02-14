@@ -46,12 +46,12 @@ ENV PYTHONDONTWRITEBYTECODE=1
 USER botuser
 
 # Expose port
-EXPOSE 8000
+EXPOSE 5000
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-    CMD curl -f http://localhost:8000/health || exit 1
+    CMD curl -f http://localhost:5000/health || exit 1
 
 # Run the application with production settings
 # uvicorn[standard] includes uvloop and httptools, which are auto-detected
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "5000", "--workers", "1"]

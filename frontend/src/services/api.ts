@@ -103,9 +103,42 @@ export const getHealth = async (): Promise<HealthResponse> => {
 };
 
 // Analysis
-export const getAnalysis = async (): Promise<AnalysisResponse> => {
-  const response = await api.get<AnalysisResponse>('/api/analysis');
+export interface AnalysisFilters {
+  startDate?: string;
+  endDate?: string;
+  security?: string;
+  lastNTrades?: number;
+}
+
+export const getAnalysis = async (filters?: AnalysisFilters): Promise<AnalysisResponse> => {
+  const params = new URLSearchParams();
+  if (filters?.startDate) params.append('start_date', filters.startDate);
+  if (filters?.endDate) params.append('end_date', filters.endDate);
+  if (filters?.security) params.append('security', filters.security);
+  if (filters?.lastNTrades) params.append('last_n_trades', filters.lastNTrades.toString());
+
+  const queryString = params.toString();
+  const url = queryString ? `/api/analysis?${queryString}` : '/api/analysis';
+  const response = await api.get<AnalysisResponse>(url);
   return response.data;
+};
+
+export const exportTrades = async (filters?: AnalysisFilters): Promise<void> => {
+  const params = new URLSearchParams();
+  if (filters?.startDate) params.append('start_date', filters.startDate);
+  if (filters?.endDate) params.append('end_date', filters.endDate);
+  params.append('format', 'csv');
+
+  const queryString = params.toString();
+  const url = `${API_BASE}/api/analysis/export?${queryString}`;
+
+  // Download file
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `trades_export.csv`;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
 };
 
 export default api;
