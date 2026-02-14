@@ -45,6 +45,7 @@ export interface BotStatus {
   paper_trading: boolean;
   paper_balance: number;
   paper_starting_balance: number;
+  live_balance: number | null;
 }
 
 export interface MarketInfo {
