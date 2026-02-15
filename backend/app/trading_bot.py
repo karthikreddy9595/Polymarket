@@ -633,10 +633,10 @@ class TradingBot:
             last_action=f"[LIVE] {self._live_state.entry_side}: {current_price:.4f} (${pnl:+.2f}) | SL: {stoploss_price:.2f} | {time_to_close:.1f}m"
         )
 
-        # Check if price reached TARGET - market sell for profit
+        # Check if price reached TARGET - limit sell at target price for profit
         if current_price >= TARGET:
             logger.info(f"[{self._timestamp()}] [LIVE] TARGET! Price {current_price:.4f} >= {TARGET}")
-            await self._market_sell(market, current_price, "TARGET")
+            await self._target_sell(market, TARGET, "TARGET")
             return
 
         # Check if price hit STOPLOSS - soft stoploss (price monitoring)
@@ -723,6 +723,75 @@ class TradingBot:
             await self._close_live_position(reason)
         else:
             logger.error(f"[{self._timestamp()}] [LIVE] Failed to sell!")
+
+    async def _target_sell(self, market: Dict[str, Any], target_price: float, reason: str) -> None:
+        """Execute limit sell order at exact target price."""
+        import math
+
+        # Prevent repeated sell attempts
+        if self._live_state.sell_attempted:
+            actual_balance = await self.client.get_conditional_balance(self._live_state.entry_token_id)
+            if actual_balance is None or actual_balance < 0.1:
+                logger.info(f"[{self._timestamp()}] [LIVE] Previous sell appears to have succeeded (balance: {actual_balance}), closing position")
+                await self._close_live_position(f"{reason}_CONFIRMED")
+                return
+            logger.info(f"[{self._timestamp()}] [LIVE] Retrying sell (balance: {actual_balance})...")
+
+        self._live_state.sell_attempted = True
+
+        # Use exact target price for limit order
+        sell_price = target_price
+
+        # Get actual conditional token balance
+        actual_balance = await self.client.get_conditional_balance(self._live_state.entry_token_id)
+        MIN_ORDER_SIZE = 0.1
+
+        if actual_balance and actual_balance >= MIN_ORDER_SIZE:
+            sell_size = math.floor(actual_balance * 100) / 100
+            logger.info(f"[{self._timestamp()}] [LIVE] Actual token balance: {actual_balance}, selling: {sell_size}")
+        elif actual_balance is not None and actual_balance < MIN_ORDER_SIZE:
+            logger.info(f"[{self._timestamp()}] [LIVE] Balance {actual_balance} too small to sell (min: {MIN_ORDER_SIZE}), closing position")
+            await self._close_live_position(f"{reason}_DUST")
+            return
+        else:
+            sell_size = self._live_state.filled_size if self._live_state.filled_size > 0 else self.settings.order_size
+            sell_size = math.floor(sell_size * 100) / 100
+            logger.info(f"[{self._timestamp()}] [LIVE] Using filled_size: {sell_size}")
+
+        if sell_size < MIN_ORDER_SIZE:
+            logger.info(f"[{self._timestamp()}] [LIVE] Sell size {sell_size} too small (min: {MIN_ORDER_SIZE}), closing position")
+            await self._close_live_position(f"{reason}_DUST")
+            return
+
+        logger.info(f"[{self._timestamp()}] [LIVE] Limit SELL {sell_size} @ {sell_price} (target price)")
+
+        sell_order_id = await self._place_order(
+            market=market,
+            token_id=self._live_state.entry_token_id,
+            side="sell",
+            price=sell_price,
+            size=sell_size,
+            outcome=self._live_state.entry_side
+        )
+
+        if sell_order_id:
+            pnl = (sell_price - self._live_state.entry_price) * sell_size
+            logger.info(f"[{self._timestamp()}] [LIVE] {reason} - Limit sell @ {sell_price:.4f} | Est P&L: ${pnl:+.2f}")
+
+            market_id = market.get("id") or market.get("conditionId")
+            await self._update_trade_status(sell_order_id, OrderStatus.FILLED)
+            await self._update_live_position(
+                market_id=market_id,
+                token_id=self._live_state.entry_token_id,
+                side="sell",
+                price=sell_price,
+                size=sell_size,
+                outcome=self._live_state.entry_side
+            )
+
+            await self._close_live_position(reason)
+        else:
+            logger.error(f"[{self._timestamp()}] [LIVE] Failed to place limit sell!")
 
     async def _close_live_position(self, reason: str) -> None:
         """Close live position and update state."""
@@ -1034,10 +1103,11 @@ class TradingBot:
 
         logger.info(f"[{self._timestamp()}] [MONITOR] {self._paper_state.entry_side}: {current_price:.4f} | Entry: {entry_price:.4f} | P&L: {pnl_pct:+.1f}% | Time: {time_to_close:.2f}m | SL: {stoploss_price:.4f} | Target: {TARGET}")
 
-        # Check if price reached TARGET - exit for profit
+        # Check if price reached TARGET - exit with limit order at target price
         if current_price >= TARGET:
             logger.info(f"[{self._timestamp()}] [PAPER] TARGET! Price {current_price:.4f} >= {TARGET}")
-            await self._exit_paper_position_unified(market, current_price, "TARGET")
+            # Use target price for limit order instead of current price
+            await self._exit_paper_position_unified(market, TARGET, "TARGET")
             return
 
         # Check if price hit STOPLOSS - soft stoploss (same as live trading)
