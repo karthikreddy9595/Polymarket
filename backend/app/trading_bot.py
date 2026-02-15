@@ -383,7 +383,8 @@ class TradingBot:
         TARGET = self.settings.target
         ORDER_CANCEL_THRESHOLD = self.settings.order_cancel_threshold
         NO_BUY_THRESHOLD = 10 / 60  # 10 seconds in minutes = 0.1667 - no buying below this
-        FORCE_CLOSE_THRESHOLD = 0 / 60  # 7 seconds in minutes = 0.0833 - force sell positions
+        FORCE_CLOSE_THRESHOLD = 5 / 60  # 5 seconds in minutes - force sell all positions
+        EARLY_BUY_THRESHOLD = 3.0  # 3 minutes - don't buy in first 2 minutes of trading window
         max_positions = self.settings.max_positions_per_market
 
         # Get fresh time to close
@@ -444,6 +445,14 @@ class TradingBot:
             logger.info(f"[{self._timestamp()}] [LIVE] No buying - only {time_seconds:.1f}s to expiry (< 10s)")
             await self._update_bot_state(
                 last_action=f"[LIVE] No buying - {time_seconds:.1f}s to expiry"
+            )
+            return
+
+        # NO BUYING in first 2 minutes of trading window (when > 3 minutes to expiry)
+        if time_to_close > EARLY_BUY_THRESHOLD:
+            logger.info(f"[{self._timestamp()}] [LIVE] Waiting for entry window - {time_to_close:.2f}m to expiry (> {EARLY_BUY_THRESHOLD}m)")
+            await self._update_bot_state(
+                last_action=f"[LIVE] Waiting for entry window - {time_to_close:.1f}m to expiry"
             )
             return
 
@@ -814,7 +823,8 @@ class TradingBot:
         TARGET = self.settings.target
         ORDER_CANCEL_THRESHOLD = self.settings.order_cancel_threshold
         NO_BUY_THRESHOLD = 10 / 60  # 10 seconds in minutes = 0.1667 - no buying below this
-        FORCE_CLOSE_THRESHOLD = 5 / 60  # 5 seconds in minutes = 0.0833 - force sell positions
+        FORCE_CLOSE_THRESHOLD = 3 / 60  # 5 seconds in minutes - force sell all positions
+        EARLY_BUY_THRESHOLD = 3.0  # 3 minutes - don't buy in first 2 minutes of trading window
         max_positions = self.settings.max_positions_per_market
 
         # Get FRESH time to expiry (not stale from market dict)
@@ -873,6 +883,14 @@ class TradingBot:
             logger.info(f"[{self._timestamp()}] [PAPER] No buying - only {time_seconds:.1f}s to expiry (< 10s)")
             await self._update_bot_state(
                 last_action=f"[PAPER] No buying - {time_seconds:.1f}s to expiry"
+            )
+            return
+
+        # NO BUYING in first 2 minutes of trading window (when > 3 minutes to expiry)
+        if time_to_close > EARLY_BUY_THRESHOLD:
+            logger.info(f"[{self._timestamp()}] [PAPER] Waiting for entry window - {time_to_close:.2f}m to expiry (> {EARLY_BUY_THRESHOLD}m)")
+            await self._update_bot_state(
+                last_action=f"[PAPER] Waiting for entry window - {time_to_close:.1f}m to expiry"
             )
             return
 
