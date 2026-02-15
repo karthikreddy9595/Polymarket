@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
-import { Clock, Target } from 'lucide-react';
+import { Target, Calendar } from 'lucide-react';
 import { getMarketInfo } from '../services/api';
 
 interface MarketInfoProps {
@@ -16,51 +16,38 @@ export default function MarketInfo({ marketId }: MarketInfoProps) {
 
   if (isLoading || !market) {
     return (
-      <div className="bg-gray-800 rounded-lg p-6 animate-pulse">
+      <div className="bg-gray-800 rounded-lg p-4 md:p-6 animate-pulse">
         <div className="h-6 bg-gray-700 rounded w-1/3 mb-4"></div>
-        <div className="h-20 bg-gray-700 rounded"></div>
+        <div className="h-16 bg-gray-700 rounded"></div>
       </div>
     );
   }
 
   return (
-    <div className="bg-gray-800 rounded-lg p-6">
+    <div className="bg-gray-800 rounded-lg p-4 md:p-6">
       {/* Header */}
-      <div className="flex items-center justify-between mb-4">
-        <h2 className="text-xl font-semibold text-white flex items-center gap-2">
-          <Target className="w-5 h-5" />
+      <div className="flex items-center gap-2 mb-3 md:mb-4">
+        <Target className="w-4 h-4 md:w-5 md:h-5 text-purple-400" />
+        <h2 className="text-base md:text-xl font-semibold text-white">
           Current Market
         </h2>
       </div>
 
-      {/* Time to Close */}
-      <div className="p-4 bg-gray-700/50 rounded-lg border border-gray-600/50 mb-4">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2 text-gray-400">
-            <Clock className="w-5 h-5" />
-            <span className="text-sm font-medium">Time to Close</span>
-          </div>
-          <p
-            className={`text-2xl font-bold font-mono ${
-              market.time_to_close_minutes <= 3
-                ? 'text-red-400'
-                : market.time_to_close_minutes <= 5
-                ? 'text-yellow-400'
-                : 'text-green-400'
-            }`}
-          >
-            {market.time_to_close_minutes.toFixed(2)} min
-          </p>
-        </div>
-      </div>
-
       {/* Market Title */}
-      <div>
-        <h3 className="text-white font-medium line-clamp-2">{market.title}</h3>
+      <div className="p-3 md:p-4 bg-gray-700/50 rounded-lg border border-gray-600/50">
+        <h3 className="text-sm md:text-base text-white font-medium leading-relaxed">
+          {market.title}
+        </h3>
         {market.description && (
-          <p className="text-gray-400 text-sm mt-1 line-clamp-2">
+          <p className="text-xs md:text-sm text-gray-400 mt-2 line-clamp-2">
             {market.description}
           </p>
+        )}
+        {market.end_date && (
+          <div className="flex items-center gap-1.5 mt-2 text-xs text-gray-500">
+            <Calendar className="w-3 h-3" />
+            <span>Ends: {new Date(market.end_date).toLocaleString()}</span>
+          </div>
         )}
       </div>
     </div>

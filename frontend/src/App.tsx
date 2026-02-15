@@ -5,9 +5,8 @@ import BotControls from './components/BotControls';
 import PnLDisplay from './components/PnLDisplay';
 import Positions from './components/Positions';
 import TradeHistory from './components/TradeHistory';
-import MarketInfo from './components/MarketInfo';
 import Analysis from './components/Analysis';
-import { BarChart3, TrendingUp, TrendingDown } from 'lucide-react';
+import { BarChart3, TrendingUp, TrendingDown, Clock } from 'lucide-react';
 import { usePriceWebSocket } from './hooks/usePriceWebSocket';
 
 function App() {
@@ -64,68 +63,31 @@ function App() {
     <div className="min-h-screen bg-gray-900 p-6">
       <div className="max-w-7xl mx-auto">
         {/* Header */}
-        <header className="mb-8">
-          <div className="flex items-center justify-between">
+        <header className="mb-6 md:mb-8">
+          {/* Top Row - Title and Actions */}
+          <div className="flex items-center justify-between mb-4">
             {/* Left - Title */}
             <div className="flex-shrink-0">
-              <h1 className="text-3xl font-bold text-white">
-                Polymarket Trading Bot
+              <h1 className="text-xl md:text-3xl font-bold text-white">
+                Polymarket Bot
               </h1>
-              <p className="text-gray-400 mt-1">
+              <p className="text-gray-400 text-xs md:text-base mt-0.5 md:mt-1 hidden sm:block">
                 Automated trading for Bitcoin 5-minute markets
               </p>
             </div>
 
-            {/* Center - Live Prices (Always visible) */}
-            <div className="flex items-center gap-3">
-              {/* UP Price (YES) */}
-              <div className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-green-900/60 to-green-800/40 border border-green-600/50 rounded-xl">
-                <div className="flex items-center justify-center w-8 h-8 bg-green-500/20 rounded-lg">
-                  <TrendingUp className="w-5 h-5 text-green-400" />
-                </div>
-                <div>
-                  <p className="text-[10px] uppercase tracking-wider text-green-400/80 font-medium">UP</p>
-                  <p className="text-xl font-bold text-white font-mono leading-none">
-                    {yesPrice?.toFixed(3) ?? '-.---'}
-                  </p>
-                </div>
-                <div className="ml-1 px-2 py-0.5 bg-green-500/20 rounded text-xs text-green-300 font-medium">
-                  {yesPrice ? `${(yesPrice * 100).toFixed(0)}%` : '--%'}
-                </div>
-              </div>
-
-              {/* Divider */}
-              <div className="h-10 w-px bg-gray-600"></div>
-
-              {/* DOWN Price (NO) */}
-              <div className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-red-900/60 to-red-800/40 border border-red-600/50 rounded-xl">
-                <div className="flex items-center justify-center w-8 h-8 bg-red-500/20 rounded-lg">
-                  <TrendingDown className="w-5 h-5 text-red-400" />
-                </div>
-                <div>
-                  <p className="text-[10px] uppercase tracking-wider text-red-400/80 font-medium">DOWN</p>
-                  <p className="text-xl font-bold text-white font-mono leading-none">
-                    {noPrice?.toFixed(3) ?? '-.---'}
-                  </p>
-                </div>
-                <div className="ml-1 px-2 py-0.5 bg-red-500/20 rounded text-xs text-red-300 font-medium">
-                  {noPrice ? `${(noPrice * 100).toFixed(0)}%` : '--%'}
-                </div>
-              </div>
-            </div>
-
             {/* Right - Actions */}
-            <div className="flex items-center gap-4 flex-shrink-0">
+            <div className="flex items-center gap-2 md:gap-4 flex-shrink-0">
               {/* Analysis Button */}
               <button
                 onClick={() => setShowAnalysis(true)}
-                className="flex items-center gap-2 px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg transition-colors"
+                className="flex items-center gap-1.5 md:gap-2 px-3 md:px-4 py-1.5 md:py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg transition-colors text-sm md:text-base"
               >
-                <BarChart3 size={18} />
-                Analysis
+                <BarChart3 size={16} className="md:w-[18px] md:h-[18px]" />
+                <span className="hidden sm:inline">Analysis</span>
               </button>
               <div
-                className={`flex items-center gap-2 px-3 py-1 rounded-full text-sm ${
+                className={`flex items-center gap-1.5 md:gap-2 px-2 md:px-3 py-1 rounded-full text-xs md:text-sm ${
                   health?.polymarket_connected
                     ? 'bg-green-900 text-green-300'
                     : 'bg-red-900 text-red-300'
@@ -136,7 +98,81 @@ function App() {
                     health?.polymarket_connected ? 'bg-green-400' : 'bg-red-400'
                   }`}
                 />
-                {health?.polymarket_connected ? 'Connected' : 'Disconnected'}
+                <span className="hidden sm:inline">
+                  {health?.polymarket_connected ? 'Connected' : 'Disconnected'}
+                </span>
+              </div>
+            </div>
+          </div>
+
+          {/* Timer and Market Info Row */}
+          {market && (
+            <div className="flex items-center gap-3 md:gap-4 mb-3 md:mb-4 py-2 px-3 md:px-4 bg-gray-800/60 border border-gray-700/50 rounded-xl">
+              {/* Timer */}
+              <div className="flex items-center gap-2 flex-shrink-0">
+                <Clock className="w-4 h-4 md:w-5 md:h-5 text-gray-400" />
+                <span
+                  className={`text-lg md:text-2xl font-bold font-mono ${
+                    market.time_to_close_minutes <= 3
+                      ? 'text-red-400'
+                      : market.time_to_close_minutes <= 5
+                      ? 'text-yellow-400'
+                      : 'text-green-400'
+                  }`}
+                >
+                  {market.time_to_close_minutes.toFixed(2)}
+                </span>
+                <span className="text-xs md:text-sm text-gray-400">min</span>
+              </div>
+
+              {/* Divider */}
+              <div className="h-6 md:h-8 w-px bg-gray-600 flex-shrink-0"></div>
+
+              {/* Scrolling Market Title */}
+              <div className="flex-1 overflow-hidden">
+                <div className="animate-marquee whitespace-nowrap">
+                  <span className="text-sm md:text-base text-gray-300 px-4">{market.title}</span>
+                  <span className="text-sm md:text-base text-gray-500 px-4">•</span>
+                  <span className="text-sm md:text-base text-gray-300 px-4">{market.title}</span>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Live Prices Row - Full width on mobile */}
+          <div className="flex items-center justify-center gap-2 md:gap-3">
+            {/* UP Price (YES) */}
+            <div className="flex-1 md:flex-none flex items-center gap-2 md:gap-3 px-3 md:px-4 py-2 md:py-3 bg-gradient-to-r from-green-900/60 to-green-800/40 border border-green-600/50 rounded-xl">
+              <div className="flex items-center justify-center w-8 h-8 md:w-10 md:h-10 bg-green-500/20 rounded-lg">
+                <TrendingUp className="w-4 h-4 md:w-5 md:h-5 text-green-400" />
+              </div>
+              <div className="flex-1 md:flex-none">
+                <p className="text-[10px] md:text-xs uppercase tracking-wider text-green-400/80 font-medium">UP</p>
+                <p className="text-lg md:text-2xl font-bold text-white font-mono leading-none">
+                  {yesPrice?.toFixed(3) ?? '-.---'}
+                </p>
+              </div>
+              <div className="px-1.5 md:px-2 py-0.5 bg-green-500/20 rounded text-[10px] md:text-xs text-green-300 font-medium">
+                {yesPrice ? `${(yesPrice * 100).toFixed(0)}%` : '--%'}
+              </div>
+            </div>
+
+            {/* Divider */}
+            <div className="h-8 md:h-12 w-px bg-gray-600 flex-shrink-0"></div>
+
+            {/* DOWN Price (NO) */}
+            <div className="flex-1 md:flex-none flex items-center gap-2 md:gap-3 px-3 md:px-4 py-2 md:py-3 bg-gradient-to-r from-red-900/60 to-red-800/40 border border-red-600/50 rounded-xl">
+              <div className="flex items-center justify-center w-8 h-8 md:w-10 md:h-10 bg-red-500/20 rounded-lg">
+                <TrendingDown className="w-4 h-4 md:w-5 md:h-5 text-red-400" />
+              </div>
+              <div className="flex-1 md:flex-none">
+                <p className="text-[10px] md:text-xs uppercase tracking-wider text-red-400/80 font-medium">DOWN</p>
+                <p className="text-lg md:text-2xl font-bold text-white font-mono leading-none">
+                  {noPrice?.toFixed(3) ?? '-.---'}
+                </p>
+              </div>
+              <div className="px-1.5 md:px-2 py-0.5 bg-red-500/20 rounded text-[10px] md:text-xs text-red-300 font-medium">
+                {noPrice ? `${(noPrice * 100).toFixed(0)}%` : '--%'}
               </div>
             </div>
           </div>
@@ -144,12 +180,9 @@ function App() {
 
         {/* Main Grid */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          {/* Left Column - Controls and Status */}
+          {/* Left Column - Controls */}
           <div className="space-y-6">
             <BotControls />
-            {status?.current_market_id && (
-              <MarketInfo marketId={status.current_market_id} />
-            )}
           </div>
 
           {/* Middle Column - P&L and Positions */}

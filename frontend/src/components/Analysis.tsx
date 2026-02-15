@@ -70,11 +70,40 @@ function Analysis({ onBack }: AnalysisProps) {
   const metrics = data?.metrics;
   const trades = data?.trades || [];
 
-  // Sorted and filtered trades for table display - must be before any conditional returns
-  const sortedAndFilteredTrades = useMemo(() => {
+  // Get starting equity from metrics
+  const startingEquity = metrics?.starting_equity ?? 1000;
+
+  // First, calculate cumulative values in chronological order (oldest to newest)
+  const tradesWithCumulatives = useMemo(() => {
     if (!trades || trades.length === 0) return [];
 
-    let filtered = [...trades];
+    // Sort by timestamp ascending (oldest first) to calculate cumulative values correctly
+    const chronologicalTrades = [...trades].sort((a, b) => {
+      const timeA = a.timestamp ? new Date(a.timestamp).getTime() : 0;
+      const timeB = b.timestamp ? new Date(b.timestamp).getTime() : 0;
+      return timeA - timeB;
+    });
+
+    // Calculate cumulative values in chronological order
+    let cumulativeProfit = 0;
+    let cumulativeEquity = startingEquity;
+
+    return chronologicalTrades.map(trade => {
+      cumulativeProfit += trade.profit_loss ?? 0;
+      cumulativeEquity += trade.profit_loss ?? 0;
+      return {
+        ...trade,
+        cumulative_profit: Math.round(cumulativeProfit * 10000) / 10000,
+        cumulative_equity: Math.round(cumulativeEquity * 100) / 100,
+      };
+    });
+  }, [trades, startingEquity]);
+
+  // Sorted and filtered trades for table display - must be before any conditional returns
+  const sortedAndFilteredTrades = useMemo(() => {
+    if (!tradesWithCumulatives || tradesWithCumulatives.length === 0) return [];
+
+    let filtered = [...tradesWithCumulatives];
 
     // Apply search filter (market name)
     if (tableSearchQuery) {
@@ -96,7 +125,7 @@ function Analysis({ onBack }: AnalysisProps) {
       filtered = filtered.filter(trade => (trade.profit_loss ?? 0) < 0);
     }
 
-    // Apply sorting
+    // Apply sorting for display
     filtered.sort((a, b) => {
       let comparison = 0;
       switch (tableSortField) {
@@ -119,7 +148,7 @@ function Analysis({ onBack }: AnalysisProps) {
     });
 
     return filtered;
-  }, [trades, tableSearchQuery, tableSecurityFilter, tablePnlFilter, tableSortField, tableSortOrder]);
+  }, [tradesWithCumulatives, tableSearchQuery, tableSecurityFilter, tablePnlFilter, tableSortField, tableSortOrder]);
 
   // Show recent 20 trades in the P&L chart (sorted by timestamp ascending for chronological view)
   const pnlData = useMemo(() => {
@@ -193,33 +222,35 @@ function Analysis({ onBack }: AnalysisProps) {
     <div className="min-h-screen bg-gray-900 p-6">
       <div className="max-w-7xl mx-auto">
         {/* Header */}
-        <header className="mb-8">
+        <header className="mb-6 md:mb-8">
           <button
             onClick={onBack}
-            className="flex items-center gap-2 text-gray-400 hover:text-white mb-4 transition-colors"
+            className="flex items-center gap-2 text-gray-400 hover:text-white mb-3 md:mb-4 transition-colors text-sm md:text-base"
           >
-            <ArrowLeft size={20} />
-            Back to Dashboard
+            <ArrowLeft size={18} className="md:w-5 md:h-5" />
+            <span className="hidden sm:inline">Back to Dashboard</span>
+            <span className="sm:hidden">Back</span>
           </button>
-          <div className="flex items-center justify-between">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 sm:gap-4">
             <div>
-              <h1 className="text-3xl font-bold text-white">Trading Analysis</h1>
-              <p className="text-gray-400 mt-1">
-                Performance metrics and trade history
+              <h1 className="text-xl md:text-3xl font-bold text-white">Trading Analysis</h1>
+              <p className="text-gray-400 text-xs md:text-base mt-0.5 md:mt-1">
+                <span className="hidden sm:inline">Performance metrics and trade history</span>
+                <span className="sm:hidden">Performance metrics</span>
                 {trades.length > 0 && ` (${trades.length} trades)`}
               </p>
             </div>
-            <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2 md:gap-3">
               <button
                 onClick={() => setShowFilters(!showFilters)}
-                className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors ${
+                className={`flex items-center gap-1.5 md:gap-2 px-3 md:px-4 py-1.5 md:py-2 rounded-lg transition-colors text-sm md:text-base ${
                   hasActiveFilters
                     ? 'bg-purple-600 hover:bg-purple-700 text-white'
                     : 'bg-gray-700 hover:bg-gray-600 text-gray-300'
                 }`}
               >
-                <Filter size={18} />
-                Filters
+                <Filter size={16} className="md:w-[18px] md:h-[18px]" />
+                <span className="hidden sm:inline">Filters</span>
                 {hasActiveFilters && (
                   <span className="bg-white text-purple-600 text-xs px-1.5 py-0.5 rounded-full">
                     Active
@@ -228,10 +259,11 @@ function Analysis({ onBack }: AnalysisProps) {
               </button>
               <button
                 onClick={handleExport}
-                className="flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg transition-colors"
+                className="flex items-center gap-1.5 md:gap-2 px-3 md:px-4 py-1.5 md:py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg transition-colors text-sm md:text-base"
               >
-                <Download size={18} />
-                Export CSV
+                <Download size={16} className="md:w-[18px] md:h-[18px]" />
+                <span className="hidden sm:inline">Export CSV</span>
+                <span className="sm:hidden">Export</span>
               </button>
             </div>
           </div>
@@ -239,44 +271,44 @@ function Analysis({ onBack }: AnalysisProps) {
 
         {/* Filter Panel */}
         {showFilters && (
-          <div className="bg-gray-800 rounded-lg p-4 mb-6">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-semibold text-white">Filters</h3>
+          <div className="bg-gray-800 rounded-lg p-3 md:p-4 mb-4 md:mb-6">
+            <div className="flex items-center justify-between mb-3 md:mb-4">
+              <h3 className="text-base md:text-lg font-semibold text-white">Filters</h3>
               {hasActiveFilters && (
                 <button
                   onClick={clearFilters}
-                  className="flex items-center gap-1 text-sm text-gray-400 hover:text-white"
+                  className="flex items-center gap-1 text-xs md:text-sm text-gray-400 hover:text-white"
                 >
-                  <X size={16} />
+                  <X size={14} className="md:w-4 md:h-4" />
                   Clear all
                 </button>
               )}
             </div>
-            <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-2 md:gap-4">
               <div>
-                <label className="block text-sm text-gray-400 mb-1">Start Date</label>
+                <label className="block text-xs md:text-sm text-gray-400 mb-1">Start Date</label>
                 <input
                   type="date"
                   value={localStartDate}
                   onChange={(e) => setLocalStartDate(e.target.value)}
-                  className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:border-purple-500"
+                  className="w-full px-2 md:px-3 py-1.5 md:py-2 bg-gray-700 border border-gray-600 rounded-lg text-white text-sm focus:outline-none focus:border-purple-500"
                 />
               </div>
               <div>
-                <label className="block text-sm text-gray-400 mb-1">End Date</label>
+                <label className="block text-xs md:text-sm text-gray-400 mb-1">End Date</label>
                 <input
                   type="date"
                   value={localEndDate}
                   onChange={(e) => setLocalEndDate(e.target.value)}
-                  className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:border-purple-500"
+                  className="w-full px-2 md:px-3 py-1.5 md:py-2 bg-gray-700 border border-gray-600 rounded-lg text-white text-sm focus:outline-none focus:border-purple-500"
                 />
               </div>
               <div>
-                <label className="block text-sm text-gray-400 mb-1">Security</label>
+                <label className="block text-xs md:text-sm text-gray-400 mb-1">Security</label>
                 <select
                   value={localSecurity}
                   onChange={(e) => setLocalSecurity(e.target.value)}
-                  className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:border-purple-500"
+                  className="w-full px-2 md:px-3 py-1.5 md:py-2 bg-gray-700 border border-gray-600 rounded-lg text-white text-sm focus:outline-none focus:border-purple-500"
                 >
                   <option value="">All</option>
                   <option value="Up">Up</option>
@@ -286,9 +318,9 @@ function Analysis({ onBack }: AnalysisProps) {
               <div className="flex items-end">
                 <button
                   onClick={applyFilters}
-                  className="w-full px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg transition-colors"
+                  className="w-full px-3 md:px-4 py-1.5 md:py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg transition-colors text-sm md:text-base"
                 >
-                  Apply Filters
+                  Apply
                 </button>
               </div>
             </div>
@@ -296,7 +328,7 @@ function Analysis({ onBack }: AnalysisProps) {
         )}
 
         {/* Key Metrics Cards */}
-        <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4 mb-8">
+        <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-2 md:gap-4 mb-4 md:mb-8">
           <MetricCard
             title="Win Rate"
             value={`${metrics?.win_rate || 0}%`}
@@ -338,11 +370,11 @@ function Analysis({ onBack }: AnalysisProps) {
         </div>
 
         {/* Charts Row 1 */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 md:gap-6 mb-4 md:mb-6">
           {/* Equity Curve */}
-          <div className="bg-gray-800 rounded-lg p-4">
-            <h3 className="text-lg font-semibold text-white mb-4">
-              Equity Curve ({equityData.length} points)
+          <div className="bg-gray-800 rounded-lg p-3 md:p-4">
+            <h3 className="text-base md:text-lg font-semibold text-white mb-3 md:mb-4">
+              Equity Curve ({equityData.length} pts)
             </h3>
             <ResponsiveContainer width="100%" height={300}>
               <AreaChart data={equityData}>
@@ -373,8 +405,8 @@ function Analysis({ onBack }: AnalysisProps) {
           </div>
 
           {/* Drawdown Chart */}
-          <div className="bg-gray-800 rounded-lg p-4">
-            <h3 className="text-lg font-semibold text-white mb-4">Drawdown</h3>
+          <div className="bg-gray-800 rounded-lg p-3 md:p-4">
+            <h3 className="text-base md:text-lg font-semibold text-white mb-3 md:mb-4">Drawdown</h3>
             <ResponsiveContainer width="100%" height={300}>
               <AreaChart data={equityData}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
@@ -405,10 +437,10 @@ function Analysis({ onBack }: AnalysisProps) {
         </div>
 
         {/* Charts Row 2 */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 md:gap-6 mb-4 md:mb-6">
           {/* Win/Loss Pie Chart */}
-          <div className="bg-gray-800 rounded-lg p-4">
-            <h3 className="text-lg font-semibold text-white mb-4">Win/Loss Distribution</h3>
+          <div className="bg-gray-800 rounded-lg p-3 md:p-4">
+            <h3 className="text-base md:text-lg font-semibold text-white mb-3 md:mb-4">Win/Loss</h3>
             <ResponsiveContainer width="100%" height={200}>
               <PieChart>
                 <Pie
@@ -433,9 +465,9 @@ function Analysis({ onBack }: AnalysisProps) {
           </div>
 
           {/* P&L per Trade - Shows recent 20 trades */}
-          <div className="bg-gray-800 rounded-lg p-4 lg:col-span-2">
-            <h3 className="text-lg font-semibold text-white mb-4">
-              P&L per Trade {trades.length > 20 ? `(Recent ${pnlData.length} of ${trades.length})` : `(${pnlData.length} trades)`}
+          <div className="bg-gray-800 rounded-lg p-3 md:p-4 lg:col-span-2">
+            <h3 className="text-base md:text-lg font-semibold text-white mb-3 md:mb-4">
+              P&L per Trade {trades.length > 20 ? `(${pnlData.length}/${trades.length})` : `(${pnlData.length})`}
             </h3>
             <ResponsiveContainer width="100%" height={200}>
               <BarChart data={pnlData} margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
@@ -477,8 +509,8 @@ function Analysis({ onBack }: AnalysisProps) {
         </div>
 
         {/* Cumulative P&L Chart */}
-        <div className="bg-gray-800 rounded-lg p-4 mb-6">
-          <h3 className="text-lg font-semibold text-white mb-4">Cumulative P&L</h3>
+        <div className="bg-gray-800 rounded-lg p-3 md:p-4 mb-4 md:mb-6">
+          <h3 className="text-base md:text-lg font-semibold text-white mb-3 md:mb-4">Cumulative P&L</h3>
           <ResponsiveContainer width="100%" height={250}>
             <AreaChart data={pnlData}>
               <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
@@ -505,10 +537,10 @@ function Analysis({ onBack }: AnalysisProps) {
         </div>
 
         {/* Detailed Metrics */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
-          <div className="bg-gray-800 rounded-lg p-4">
-            <h3 className="text-lg font-semibold text-white mb-4">Performance Metrics</h3>
-            <div className="grid grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 md:gap-6 mb-4 md:mb-6">
+          <div className="bg-gray-800 rounded-lg p-3 md:p-4">
+            <h3 className="text-base md:text-lg font-semibold text-white mb-3 md:mb-4">Performance Metrics</h3>
+            <div className="grid grid-cols-2 gap-2 md:gap-4">
               <MetricRow label="Winning Trades" value={metrics?.winning_trades || 0} />
               <MetricRow label="Losing Trades" value={metrics?.losing_trades || 0} />
               <MetricRow label="Avg Profit" value={`$${metrics?.avg_profit?.toFixed(4) || '0.00'}`} />
@@ -520,9 +552,9 @@ function Analysis({ onBack }: AnalysisProps) {
             </div>
           </div>
 
-          <div className="bg-gray-800 rounded-lg p-4">
-            <h3 className="text-lg font-semibold text-white mb-4">Risk Metrics</h3>
-            <div className="grid grid-cols-2 gap-4">
+          <div className="bg-gray-800 rounded-lg p-3 md:p-4">
+            <h3 className="text-base md:text-lg font-semibold text-white mb-3 md:mb-4">Risk Metrics</h3>
+            <div className="grid grid-cols-2 gap-2 md:gap-4">
               <MetricRow label="Max Drawdown $" value={`$${metrics?.max_drawdown?.toFixed(2) || '0.00'}`} />
               <MetricRow label="Max Drawdown %" value={`${metrics?.max_drawdown_pct?.toFixed(2) || '0'}%`} />
               <MetricRow label="Starting Equity" value={`$${metrics?.starting_equity?.toFixed(2) || '0.00'}`} />
@@ -536,24 +568,24 @@ function Analysis({ onBack }: AnalysisProps) {
         </div>
 
         {/* Trade History Table */}
-        <div className="bg-gray-800 rounded-lg p-4">
-          <div className="flex items-center justify-between mb-4">
-            <h3 className="text-lg font-semibold text-white">
-              Trade History ({sortedAndFilteredTrades.length} of {trades.length} trades)
+        <div className="bg-gray-800 rounded-lg p-3 md:p-4">
+          <div className="flex items-center justify-between mb-3 md:mb-4">
+            <h3 className="text-base md:text-lg font-semibold text-white">
+              Trade History ({sortedAndFilteredTrades.length}/{trades.length})
             </h3>
           </div>
 
           {/* Table Filters */}
-          <div className="flex flex-wrap items-center gap-3 mb-4 p-3 bg-gray-700/50 rounded-lg">
+          <div className="flex flex-wrap items-center gap-2 md:gap-3 mb-3 md:mb-4 p-2 md:p-3 bg-gray-700/50 rounded-lg">
             {/* Search */}
-            <div className="relative flex-1 min-w-[200px]">
-              <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400" size={16} />
+            <div className="relative flex-1 min-w-[120px] md:min-w-[200px]">
+              <Search className="absolute left-2 md:left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-3.5 h-3.5 md:w-4 md:h-4" />
               <input
                 type="text"
-                placeholder="Search market name..."
+                placeholder="Search..."
                 value={tableSearchQuery}
                 onChange={(e) => setTableSearchQuery(e.target.value)}
-                className="w-full pl-9 pr-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white text-sm focus:outline-none focus:border-purple-500"
+                className="w-full pl-7 md:pl-9 pr-2 md:pr-3 py-1.5 md:py-2 bg-gray-700 border border-gray-600 rounded-lg text-white text-xs md:text-sm focus:outline-none focus:border-purple-500"
               />
             </div>
 
@@ -561,9 +593,9 @@ function Analysis({ onBack }: AnalysisProps) {
             <select
               value={tableSecurityFilter}
               onChange={(e) => setTableSecurityFilter(e.target.value)}
-              className="px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white text-sm focus:outline-none focus:border-purple-500"
+              className="px-2 md:px-3 py-1.5 md:py-2 bg-gray-700 border border-gray-600 rounded-lg text-white text-xs md:text-sm focus:outline-none focus:border-purple-500"
             >
-              <option value="">All Securities</option>
+              <option value="">All</option>
               <option value="Up">Up</option>
               <option value="Down">Down</option>
             </select>
@@ -572,11 +604,11 @@ function Analysis({ onBack }: AnalysisProps) {
             <select
               value={tablePnlFilter}
               onChange={(e) => setTablePnlFilter(e.target.value)}
-              className="px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white text-sm focus:outline-none focus:border-purple-500"
+              className="px-2 md:px-3 py-1.5 md:py-2 bg-gray-700 border border-gray-600 rounded-lg text-white text-xs md:text-sm focus:outline-none focus:border-purple-500"
             >
-              <option value="">All P&L</option>
-              <option value="profit">Profits Only</option>
-              <option value="loss">Losses Only</option>
+              <option value="">P&L</option>
+              <option value="profit">Profit</option>
+              <option value="loss">Loss</option>
             </select>
 
             {/* Clear Filters */}
@@ -587,10 +619,10 @@ function Analysis({ onBack }: AnalysisProps) {
                   setTableSecurityFilter('');
                   setTablePnlFilter('');
                 }}
-                className="flex items-center gap-1 px-3 py-2 text-gray-400 hover:text-white text-sm"
+                className="flex items-center gap-1 px-2 md:px-3 py-1.5 md:py-2 text-gray-400 hover:text-white text-xs md:text-sm"
               >
-                <X size={16} />
-                Clear
+                <X size={14} className="md:w-4 md:h-4" />
+                <span className="hidden sm:inline">Clear</span>
               </button>
             )}
           </div>
@@ -728,12 +760,12 @@ function MetricCard({ title, value, icon, color }: {
   };
 
   return (
-    <div className={`rounded-lg p-4 border ${colorClasses[color] || colorClasses.blue}`}>
-      <div className="flex items-center gap-2 mb-2">
+    <div className={`rounded-lg p-2 md:p-4 border ${colorClasses[color] || colorClasses.blue}`}>
+      <div className="flex items-center gap-1 md:gap-2 mb-1 md:mb-2">
         {icon}
-        <span className="text-xs text-gray-400">{title}</span>
+        <span className="text-[10px] md:text-xs text-gray-400 truncate">{title}</span>
       </div>
-      <div className="text-xl font-bold text-white">{value}</div>
+      <div className="text-base md:text-xl font-bold text-white truncate">{value}</div>
     </div>
   );
 }
