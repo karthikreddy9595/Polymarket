@@ -497,7 +497,10 @@ class TradingBot:
             self._live_state.buy_filled = False  # Will be confirmed via positions API
             self._live_state.position_open = True
 
-            logger.info(f"[{self._timestamp()}] [LIVE] BUY {side} @ {current_price:.4f} | Target: {TARGET} | SL: {STOPLOSS}")
+            # Calculate and store stoploss based on entry price (bought price - 0.17)
+            calculated_sl = self._calculate_stoploss_price(current_price, 0.17)
+            self._live_state.stoploss_price = calculated_sl
+            logger.info(f"[{self._timestamp()}] [LIVE] BUY {side} @ {current_price:.4f} | Target: {TARGET} | SL: {calculated_sl:.4f}")
 
             await self._update_bot_state(
                 last_action=f"[LIVE] Waiting for position confirmation..."
@@ -568,9 +571,8 @@ class TradingBot:
             is_filled = await self._check_order_filled()
             if is_filled:
                 self._live_state.buy_filled = True
-                # Stoploss = entry_price - 0.17
-                stoploss_price = self._calculate_stoploss_price(self._live_state.entry_price, 0.17)
-                self._live_state.stoploss_price = stoploss_price
+                # Use stoploss already calculated at entry (entry_price - 0.17)
+                stoploss_price = self._live_state.stoploss_price
                 # Use soft stoploss (price monitoring) - no limit order
                 self._live_state.use_soft_stoploss = True
                 self._live_state.stoploss_order_placed = True
