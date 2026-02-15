@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import get_settings
-from .database import init_db
+from .database import init_db, async_session_maker, get_or_create_bot_state
 from .routes import bot_router, trades_router, positions_router, websocket_router, analysis_router
 from .models.schemas import HealthResponse
 from .polymarket_client import get_polymarket_client
@@ -45,6 +45,16 @@ async def lifespan(app: FastAPI):
     # Initialize database
     await init_db()
     logger.info("Database initialized")
+
+    # Reset bot state on startup (in case of unclean shutdown)
+    async with async_session_maker() as session:
+        bot_state = await get_or_create_bot_state(session)
+        if bot_state.is_running:
+            logger.info("Resetting bot state from previous session (was running)")
+            bot_state.is_running = False
+            bot_state.last_action = "Bot stopped (server restart)"
+            await session.commit()
+    logger.info("Bot state initialized (stopped)")
 
     # Initialize Polymarket client
     client = await get_polymarket_client()

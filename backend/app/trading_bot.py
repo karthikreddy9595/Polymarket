@@ -417,6 +417,9 @@ class TradingBot:
             await self._handle_market_close_live(market)
             return
 
+        # Log current state for debugging re-entry
+        logger.debug(f"[{self._timestamp()}] [LIVE] State check: position_open={self._live_state.position_open}, positions_taken={self._live_state.positions_taken}/{max_positions}, buy_filled={self._live_state.buy_filled}")
+
         # Check if we've reached max positions
         if self._live_state.positions_taken >= max_positions:
             logger.info(f"[{self._timestamp()}] [LIVE] Max positions reached ({self._live_state.positions_taken}/{max_positions}). Waiting for next market...")
@@ -430,6 +433,10 @@ class TradingBot:
             logger.debug(f"[{self._timestamp()}] [LIVE] Position is open, monitoring...")
             await self._monitor_live_position(market)
             return
+
+        # No position open - log that we're looking for entry
+        if self._live_state.positions_taken > 0:
+            logger.info(f"[{self._timestamp()}] [LIVE] Position {self._live_state.positions_taken} closed, looking for entry #{self._live_state.positions_taken + 1}...")
 
         # NO BUYING when <= 10 seconds to expiry
         if time_to_close <= NO_BUY_THRESHOLD:
@@ -699,6 +706,17 @@ class TradingBot:
 
     async def _close_live_position(self, reason: str) -> None:
         """Close live position and update state."""
+        # Clear active orders for this token to allow re-entry
+        token_id = self._live_state.entry_token_id
+        if token_id:
+            buy_key = f"{token_id}_buy"
+            sell_key = f"{token_id}_sell"
+            if buy_key in self._active_orders:
+                del self._active_orders[buy_key]
+            if sell_key in self._active_orders:
+                del self._active_orders[sell_key]
+            logger.debug(f"[{self._timestamp()}] [LIVE] Cleared active orders for token {token_id[:16]}...")
+
         # Use the close_position method which properly resets state and increments counter
         self._live_state.close_position()
 
@@ -708,8 +726,15 @@ class TradingBot:
         await self._update_bot_state(
             last_action=f"[LIVE] [{reason}] Position closed | {positions_taken}/{max_positions}"
         )
-        logger.info(f"[{self._timestamp()}] [LIVE] POSITION CLOSED: {reason} | Positions: {positions_taken}/{max_positions}")
-        logger.info(f"[{self._timestamp()}] [LIVE] State after close: position_open={self._live_state.position_open}")
+        logger.info(f"[{self._timestamp()}] [LIVE] ════════════════════════════════════════")
+        logger.info(f"[{self._timestamp()}] [LIVE] POSITION CLOSED: {reason}")
+        logger.info(f"[{self._timestamp()}] [LIVE] Positions taken: {positions_taken}/{max_positions}")
+        logger.info(f"[{self._timestamp()}] [LIVE] State: position_open={self._live_state.position_open}, buy_filled={self._live_state.buy_filled}")
+        if positions_taken < max_positions:
+            logger.info(f"[{self._timestamp()}] [LIVE] Will look for NEW ENTRY on next iteration")
+        else:
+            logger.info(f"[{self._timestamp()}] [LIVE] Max positions reached, waiting for next market")
+        logger.info(f"[{self._timestamp()}] [LIVE] ════════════════════════════════════════")
 
     async def _handle_market_close_live(self, market: Dict[str, Any]) -> None:
         """Handle market close - cancel unfilled orders."""
@@ -822,6 +847,9 @@ class TradingBot:
             await self._handle_market_close_paper(market)
             return
 
+        # Log current state for debugging re-entry
+        logger.debug(f"[{self._timestamp()}] [PAPER] State check: position_open={self._paper_state.position_open}, positions_taken={self._paper_state.positions_taken}/{max_positions}")
+
         # Check if we've reached the maximum positions for this market
         if self._paper_state.positions_taken >= max_positions:
             logger.info(f"[{self._timestamp()}] [PAPER] Max positions reached ({self._paper_state.positions_taken}/{max_positions}). Waiting for next market...")
@@ -834,6 +862,10 @@ class TradingBot:
         if self._paper_state.position_open:
             await self._monitor_paper_position_unified(market)
             return
+
+        # No position open - log that we're looking for entry
+        if self._paper_state.positions_taken > 0:
+            logger.info(f"[{self._timestamp()}] [PAPER] Position {self._paper_state.positions_taken} closed, looking for entry #{self._paper_state.positions_taken + 1}...")
 
         # NO BUYING when <= 10 seconds to expiry
         if time_to_close <= NO_BUY_THRESHOLD:
@@ -1010,6 +1042,15 @@ class TradingBot:
                 await self._exit_paper_position_unified(market, current_price, reason)
             else:
                 logger.warning(f"[{self._timestamp()}] [PAPER] Could not get price for force sell")
+                # Clear active orders for this token to allow re-entry
+                token_id = self._paper_state.entry_token_id
+                if token_id:
+                    buy_key = f"{token_id}_buy"
+                    sell_key = f"{token_id}_sell"
+                    if buy_key in self._active_orders:
+                        del self._active_orders[buy_key]
+                    if sell_key in self._active_orders:
+                        del self._active_orders[sell_key]
                 # Close position state anyway to prevent stuck state
                 self._paper_state.close_position()
 
@@ -1054,6 +1095,17 @@ class TradingBot:
         )
 
         if order_id:
+            # Clear active orders for this token to allow re-entry
+            token_id = self._paper_state.entry_token_id
+            if token_id:
+                buy_key = f"{token_id}_buy"
+                sell_key = f"{token_id}_sell"
+                if buy_key in self._active_orders:
+                    del self._active_orders[buy_key]
+                if sell_key in self._active_orders:
+                    del self._active_orders[sell_key]
+                logger.debug(f"[{self._timestamp()}] [PAPER] Cleared active orders for token")
+
             # Use close_position method which properly resets and increments counter
             self._paper_state.close_position()
 
@@ -1070,6 +1122,10 @@ class TradingBot:
             logger.info(f"[{self._timestamp()}] [PAPER] Net P&L: {net_pnl:+.4f} ({net_pnl_pct:+.1f}%)")
             logger.info(f"[{self._timestamp()}] [PAPER] Positions taken: {positions_taken}/{max_positions}")
             logger.info(f"[{self._timestamp()}] [PAPER] State: position_open={self._paper_state.position_open}")
+            if positions_taken < max_positions:
+                logger.info(f"[{self._timestamp()}] [PAPER] Will look for NEW ENTRY on next iteration")
+            else:
+                logger.info(f"[{self._timestamp()}] [PAPER] Max positions reached, waiting for next market")
             logger.info(f"[{self._timestamp()}] [PAPER] ══════════════════════════════════════")
 
             await self._update_bot_state(
