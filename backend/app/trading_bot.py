@@ -467,6 +467,15 @@ class TradingBot:
         current_price: float
     ) -> None:
         """Place a MARKET buy order (at current price + buffer to fill immediately)."""
+        # CRITICAL: Final time check before placing order
+        NO_BUY_THRESHOLD = 10 / 60  # 10 seconds in minutes
+        market_id = market.get("id") or market.get("conditionId")
+        time_to_close = await self.client.get_time_to_close(market_id)
+        if time_to_close is not None and time_to_close <= NO_BUY_THRESHOLD:
+            time_seconds = time_to_close * 60
+            logger.info(f"[{self._timestamp()}] [LIVE] ORDER BLOCKED: Only {time_seconds:.1f}s to expiry (< 10s)")
+            return
+
         TARGET = self.settings.target
         STOPLOSS = self.settings.stoploss
         MARKET_BUY_PRICE = min(round(current_price + 0.02, 2), 0.98)
@@ -879,6 +888,15 @@ class TradingBot:
         Place a paper trading entry order (UNIFIED with live trading).
         Entry signal: price >= trigger_price and < target
         """
+        # CRITICAL: Final time check before placing order
+        NO_BUY_THRESHOLD = 10 / 60  # 10 seconds in minutes
+        market_id = market.get("id") or market.get("conditionId")
+        time_to_close = await self.client.get_time_to_close(market_id)
+        if time_to_close is not None and time_to_close <= NO_BUY_THRESHOLD:
+            time_seconds = time_to_close * 60
+            logger.info(f"[{self._timestamp()}] [PAPER] ORDER BLOCKED: Only {time_seconds:.1f}s to expiry (< 10s)")
+            return
+
         TRIGGER_PRICE = self.settings.trigger_price
         TARGET = self.settings.target
 
