@@ -51,7 +51,7 @@ class Settings(BaseSettings):
     trigger_price: float = Field(default=0.75, description="Entry trigger - buy when price >= this")
     entry_min: float = Field(default=0.78, description="Minimum price for entry signal range (legacy)")
     entry_max: float = Field(default=0.80, description="Maximum price for entry signal range (legacy)")
-    stoploss: float = Field(default=0.55, description="Stoploss price - limit sell placed here")
+    stoploss: float = Field(default=0.60, description="Stoploss price - limit sell placed here")
     target: float = Field(default=0.99, description="Target price - limit sell placed here")
     order_cancel_threshold: float = Field(default=0.167, description="Cancel unfilled orders when time to close < this (minutes). Default 10 seconds = 0.167 min")
 

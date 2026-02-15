@@ -478,7 +478,7 @@ class TradingBot:
 
         TARGET = self.settings.target
         STOPLOSS = self.settings.stoploss
-        MARKET_BUY_PRICE = min(round(current_price + 0.02, 2), 0.98)
+        MARKET_BUY_PRICE = min(round(current_price + 0.02, 2), 0.99)
 
         order_id = await self._place_order(
             market=market,
@@ -552,7 +552,7 @@ class TradingBot:
 
         return False
 
-    def _calculate_stoploss_price(self, entry_price: float, stoploss_offset: float = 0.20) -> float:
+    def _calculate_stoploss_price(self, entry_price: float, stoploss_offset: float = 0.17) -> float:
         """Calculate stoploss price. Simply: entry_price - offset."""
         # Example: Buy at 0.80, offset 0.20 -> stoploss at 0.60
         stoploss_price = entry_price - stoploss_offset
@@ -568,8 +568,8 @@ class TradingBot:
             is_filled = await self._check_order_filled()
             if is_filled:
                 self._live_state.buy_filled = True
-                # Stoploss = entry_price - 0.20
-                stoploss_price = self._calculate_stoploss_price(self._live_state.entry_price, 0.20)
+                # Stoploss = entry_price - 0.17
+                stoploss_price = self._calculate_stoploss_price(self._live_state.entry_price, 0.17)
                 self._live_state.stoploss_price = stoploss_price
                 # Use soft stoploss (price monitoring) - no limit order
                 self._live_state.use_soft_stoploss = True
@@ -920,8 +920,8 @@ class TradingBot:
         )
 
         if order_id:
-            # Calculate stoploss price same as live trading (entry - 0.20)
-            stoploss_price = self._calculate_stoploss_price(current_price, 0.20)
+            # Calculate stoploss price same as live trading (entry - 0.15)
+            stoploss_price = self._calculate_stoploss_price(current_price, 0.17)
 
             self._paper_state.position_open = True
             self._paper_state.entry_price = current_price
@@ -947,7 +947,7 @@ class TradingBot:
             return
 
         entry_price = self._paper_state.entry_price
-        stoploss_price = self._calculate_stoploss_price(entry_price, 0.20)
+        stoploss_price = self._calculate_stoploss_price(entry_price, 0.17)
         pnl = (current_price - entry_price) * self.settings.order_size
         pnl_pct = ((current_price - entry_price) / entry_price) * 100 if entry_price > 0 else 0
         time_to_close = market.get("time_to_close_minutes", 0)
