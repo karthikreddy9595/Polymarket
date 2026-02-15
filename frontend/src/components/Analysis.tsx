@@ -444,6 +444,7 @@ function Analysis({ onBack }: AnalysisProps) {
                 <tr className="text-gray-400 border-b border-gray-700">
                   <th className="text-left py-3 px-4">#</th>
                   <th className="text-left py-3 px-4">Timestamp</th>
+                  <th className="text-left py-3 px-4">Market</th>
                   <th className="text-left py-3 px-4">Security</th>
                   <th className="text-right py-3 px-4">Buy Price</th>
                   <th className="text-right py-3 px-4">Sell Price</th>
@@ -455,7 +456,7 @@ function Analysis({ onBack }: AnalysisProps) {
               <tbody>
                 {trades.length === 0 ? (
                   <tr>
-                    <td colSpan={8} className="text-center py-8 text-gray-500">
+                    <td colSpan={9} className="text-center py-8 text-gray-500">
                       No trades yet
                     </td>
                   </tr>
@@ -463,10 +464,24 @@ function Analysis({ onBack }: AnalysisProps) {
                   [...trades].reverse().map((trade, index) => (
                     <tr
                       key={index}
-                      className="border-b border-gray-700 hover:bg-gray-750"
+                      className={`border-b border-gray-700 hover:bg-gray-750 ${
+                        trade.is_auto_squared_off ? 'bg-yellow-900/20' : ''
+                      }`}
                     >
                       <td className="py-3 px-4 text-gray-500">{trades.length - index}</td>
                       <td className="py-3 px-4 text-gray-300">{trade.timestamp}</td>
+                      <td className="py-3 px-4 text-gray-300 max-w-[200px] truncate" title={trade.market_name || 'Unknown'}>
+                        {trade.market_name ? (
+                          <span className="flex items-center gap-1">
+                            {trade.market_name.length > 30 ? trade.market_name.substring(0, 30) + '...' : trade.market_name}
+                            {trade.is_auto_squared_off && (
+                              <span className="text-xs bg-yellow-700 text-yellow-200 px-1 rounded">Auto</span>
+                            )}
+                          </span>
+                        ) : (
+                          <span className="text-gray-500">Unknown</span>
+                        )}
+                      </td>
                       <td className="py-3 px-4">
                         <span className={`px-2 py-1 rounded text-xs font-medium ${
                           trade.security === 'Up' ? 'bg-green-900 text-green-300' : 'bg-red-900 text-red-300'
@@ -479,6 +494,9 @@ function Analysis({ onBack }: AnalysisProps) {
                       </td>
                       <td className="py-3 px-4 text-right text-gray-300">
                         {trade.sell_price?.toFixed(4) || '-'}
+                        {trade.is_auto_squared_off && (
+                          <span className="text-xs text-yellow-400 ml-1">(0.995)</span>
+                        )}
                       </td>
                       <td className={`py-3 px-4 text-right font-medium ${
                         trade.profit_loss >= 0 ? 'text-green-400' : 'text-red-400'

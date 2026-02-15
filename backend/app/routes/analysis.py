@@ -22,12 +22,14 @@ router = APIRouter(prefix="/api/analysis", tags=["analysis"])
 class TradeAnalysisRow(BaseModel):
     """Single trade analysis row."""
     timestamp: str
+    market_name: Optional[str]  # Market title/question
     security: str  # YES or NO (Up or Down)
     buy_price: Optional[float]
     sell_price: Optional[float]
     profit_loss: float
     cumulative_profit: float
     cumulative_equity: float
+    is_auto_squared_off: bool = False  # True if trade was auto squared off (no sell found)
 
 
 class PerformanceMetrics(BaseModel):
@@ -133,7 +135,8 @@ async def get_analysis(
     result = await db.execute(select(BotState).limit(1))
     bot_state = result.scalar_one_or_none()
 
-    starting_equity = bot_state.paper_starting_balance if bot_state else 1000.0
+    # Use PAPER_BALANCE from settings as starting equity
+    starting_equity = settings.paper_balance
 
     # Use live balance from Polymarket when in live trading mode
     if not settings.paper_trading:
@@ -183,7 +186,7 @@ async def get_analysis(
     equity = starting_equity
 
     # Track open positions for pairing
-    open_positions = {}  # token_id -> (buy_trade, outcome)
+    open_positions = {}  # token_id -> (buy_trade, outcome, market_name)
 
     winning_trades = 0
     losing_trades = 0
@@ -192,6 +195,9 @@ async def get_analysis(
     best_trade = 0.0
     worst_trade = 0.0
 
+    # Auto square off price - fixed at 0.995 per quantity
+    AUTO_SQUARE_OFF_PRICE = 0.995
+
     for trade in all_trades:
         token_id = trade.token_id
 
@@ -199,12 +205,13 @@ async def get_analysis(
             # Opening a position
             # Get outcome from position mapping, default to "Up"
             outcome = token_to_outcome.get(token_id, "Up")
-            open_positions[token_id] = (trade, outcome)
+            market_name = trade.market_name  # Get market name from trade
+            open_positions[token_id] = (trade, outcome, market_name)
 
         elif trade.side == Side.SELL:
             # Closing a position
             if token_id in open_positions:
-                buy_trade, outcome = open_positions[token_id]
+                buy_trade, outcome, market_name = open_positions[token_id]
                 del open_positions[token_id]
 
                 # Calculate P&L
@@ -232,17 +239,61 @@ async def get_analysis(
                 # Add to trade rows
                 trade_rows.append(TradeAnalysisRow(
                     timestamp=trade.created_at.strftime("%Y-%m-%d %H:%M:%S"),
+                    market_name=market_name,
                     security=outcome,
                     buy_price=buy_trade.price,
                     sell_price=trade.price,
                     profit_loss=round(pnl, 4),
                     cumulative_profit=round(cumulative_profit, 4),
-                    cumulative_equity=round(equity, 4)
+                    cumulative_equity=round(equity, 4),
+                    is_auto_squared_off=False
                 ))
 
                 # Update curves
                 equity_curve.append(equity)
                 timestamps.append(trade.created_at.strftime("%H:%M:%S"))
+
+    # Handle auto square off for remaining open positions (buys without matching sells)
+    for token_id, (buy_trade, outcome, market_name) in open_positions.items():
+        # Auto square off at 0.995 per quantity
+        sell_price = AUTO_SQUARE_OFF_PRICE
+        pnl = (sell_price - buy_trade.price) * buy_trade.size
+        cumulative_profit += pnl
+        equity += pnl
+
+        # Track returns for Sharpe calculation
+        if buy_trade.price > 0:
+            trade_return = (sell_price - buy_trade.price) / buy_trade.price
+            returns.append(trade_return)
+
+        # Track wins/losses
+        if pnl > 0:
+            winning_trades += 1
+            total_profit += pnl
+            if pnl > best_trade:
+                best_trade = pnl
+        else:
+            losing_trades += 1
+            total_loss += abs(pnl)
+            if pnl < worst_trade:
+                worst_trade = pnl
+
+        # Add auto squared off trade to rows
+        trade_rows.append(TradeAnalysisRow(
+            timestamp=buy_trade.created_at.strftime("%Y-%m-%d %H:%M:%S"),
+            market_name=market_name,
+            security=outcome,
+            buy_price=buy_trade.price,
+            sell_price=sell_price,
+            profit_loss=round(pnl, 4),
+            cumulative_profit=round(cumulative_profit, 4),
+            cumulative_equity=round(equity, 4),
+            is_auto_squared_off=True
+        ))
+
+        # Update curves
+        equity_curve.append(equity)
+        timestamps.append(buy_trade.created_at.strftime("%H:%M:%S") + " (Auto)")
 
     # Calculate drawdown curve
     peak = equity_curve[0]
@@ -352,16 +403,8 @@ async def export_trades(
     result = await db.execute(select(BotState).limit(1))
     bot_state = result.scalar_one_or_none()
 
-    # Use live balance for starting equity when in live trading mode
-    if not settings.paper_trading:
-        client = await get_polymarket_client()
-        if client.is_connected:
-            live_balance = await client.get_balance()
-            starting_equity = live_balance if live_balance is not None else (bot_state.paper_starting_balance if bot_state else 1000.0)
-        else:
-            starting_equity = bot_state.paper_starting_balance if bot_state else 1000.0
-    else:
-        starting_equity = bot_state.paper_starting_balance if bot_state else 1000.0
+    # Use PAPER_BALANCE from settings as starting equity
+    starting_equity = settings.paper_balance
 
     # Build query with filters
     query = select(Trade).where(Trade.status == OrderStatus.FILLED)
@@ -391,19 +434,23 @@ async def export_trades(
 
     # Process trades into rows
     rows = []
-    open_positions = {}
+    open_positions = {}  # token_id -> (trade, outcome, market_name)
     cumulative_profit = 0.0
     equity = starting_equity
+
+    # Auto square off price - fixed at 0.995 per quantity
+    AUTO_SQUARE_OFF_PRICE = 0.995
 
     for trade in all_trades:
         token_id = trade.token_id
 
         if trade.side == Side.BUY:
             outcome = token_to_outcome.get(token_id, "Up")
-            open_positions[token_id] = (trade, outcome)
+            market_name = trade.market_name
+            open_positions[token_id] = (trade, outcome, market_name)
         elif trade.side == Side.SELL:
             if token_id in open_positions:
-                buy_trade, outcome = open_positions[token_id]
+                buy_trade, outcome, market_name = open_positions[token_id]
                 del open_positions[token_id]
 
                 pnl = (trade.price - buy_trade.price) * trade.size
@@ -412,6 +459,7 @@ async def export_trades(
 
                 rows.append({
                     "Timestamp": trade.created_at.strftime("%Y-%m-%d %H:%M:%S"),
+                    "Market": market_name or "Unknown",
                     "Security": outcome,
                     "Buy Price": round(buy_trade.price, 4),
                     "Sell Price": round(trade.price, 4),
@@ -419,8 +467,30 @@ async def export_trades(
                     "P&L": round(pnl, 4),
                     "Cumulative P&L": round(cumulative_profit, 4),
                     "Equity": round(equity, 4),
-                    "Result": "WIN" if pnl > 0 else "LOSS"
+                    "Result": "WIN" if pnl > 0 else "LOSS",
+                    "Auto Squared Off": "No"
                 })
+
+    # Handle auto square off for remaining open positions
+    for token_id, (buy_trade, outcome, market_name) in open_positions.items():
+        sell_price = AUTO_SQUARE_OFF_PRICE
+        pnl = (sell_price - buy_trade.price) * buy_trade.size
+        cumulative_profit += pnl
+        equity += pnl
+
+        rows.append({
+            "Timestamp": buy_trade.created_at.strftime("%Y-%m-%d %H:%M:%S"),
+            "Market": market_name or "Unknown",
+            "Security": outcome,
+            "Buy Price": round(buy_trade.price, 4),
+            "Sell Price": round(sell_price, 4),
+            "Size": round(buy_trade.size, 4),
+            "P&L": round(pnl, 4),
+            "Cumulative P&L": round(cumulative_profit, 4),
+            "Equity": round(equity, 4),
+            "Result": "WIN" if pnl > 0 else "LOSS",
+            "Auto Squared Off": "Yes"
+        })
 
     # Generate CSV
     output = io.StringIO()

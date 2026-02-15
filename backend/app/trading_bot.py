@@ -383,8 +383,8 @@ class TradingBot:
         TARGET = self.settings.target
         ORDER_CANCEL_THRESHOLD = self.settings.order_cancel_threshold
         NO_BUY_THRESHOLD = 10 / 60  # 10 seconds in minutes = 0.1667 - no buying below this
-        FORCE_CLOSE_THRESHOLD = 5 / 60  # 5 seconds in minutes - force sell all positions
-        EARLY_BUY_THRESHOLD = 3.0  # 3 minutes - don't buy in first 2 minutes of trading window
+        FORCE_CLOSE_THRESHOLD = 0 / 60  # 5 seconds in minutes - force sell all positions
+        EARLY_BUY_THRESHOLD = 4.0  # 3 minutes - don't buy in first 2 minutes of trading window
         max_positions = self.settings.max_positions_per_market
 
         # Get fresh time to close
@@ -824,7 +824,7 @@ class TradingBot:
         ORDER_CANCEL_THRESHOLD = self.settings.order_cancel_threshold
         NO_BUY_THRESHOLD = 10 / 60  # 10 seconds in minutes = 0.1667 - no buying below this
         FORCE_CLOSE_THRESHOLD = 0 / 60  # 5 seconds in minutes - force sell all positions
-        EARLY_BUY_THRESHOLD = 3.5  # 3 minutes - don't buy in first 2 minutes of trading window
+        EARLY_BUY_THRESHOLD = 4  # 3 minutes - don't buy in first 2 minutes of trading window
         max_positions = self.settings.max_positions_per_market
 
         # Get FRESH time to expiry (not stale from market dict)
@@ -962,13 +962,15 @@ class TradingBot:
             logger.warning(f"[{self._timestamp()}] [PAPER] REJECTED: {side} @ {current_price:.4f} >= target {TARGET}")
             return
 
+        market_name = market.get("question") or market.get("title")
         order_id = await self._simulate_paper_order_unified(
             market_id=market.get("id") or market.get("conditionId"),
             token_id=token_id,
             side="buy",
             price=current_price,
             size=self.settings.order_size,
-            outcome=side
+            outcome=side,
+            market_name=market_name
         )
 
         if order_id:
@@ -1103,13 +1105,15 @@ class TradingBot:
         net_pnl = gross_pnl - total_fees
         net_pnl_pct = (net_pnl / buy_value) * 100 if buy_value > 0 else 0
 
+        market_name = market.get("question") or market.get("title")
         order_id = await self._simulate_paper_order_unified(
             market_id=market.get("id") or market.get("conditionId"),
             token_id=self._paper_state.entry_token_id,
             side="sell",
             price=exit_price,
             size=size,
-            outcome=entry_side
+            outcome=entry_side,
+            market_name=market_name
         )
 
         if order_id:
@@ -1170,13 +1174,15 @@ class TradingBot:
         net_pnl = gross_pnl - total_fees
         net_pnl_pct = (net_pnl / buy_value) * 100 if buy_value > 0 else 0
 
+        market_name = market.get("question") or market.get("title")
         order_id = await self._simulate_paper_order(
             market_id=market.get("id") or market.get("conditionId"),
             token_id=position.token_id,
             side="sell",
             price=exit_price,
             size=position.quantity,
-            outcome=position.outcome
+            outcome=position.outcome,
+            market_name=market_name
         )
 
         if order_id:
@@ -1294,6 +1300,7 @@ class TradingBot:
     ) -> Optional[str]:
         """Place an order and record it in the database."""
         market_id = market.get("id") or market.get("conditionId")
+        market_name = market.get("question") or market.get("title")
 
         # Check for existing order
         order_key = f"{token_id}_{side}"
@@ -1314,7 +1321,8 @@ class TradingBot:
                 side=side,
                 price=price,
                 size=size,
-                outcome=outcome
+                outcome=outcome,
+                market_name=market_name
             )
             return order_id
 
@@ -1343,7 +1351,8 @@ class TradingBot:
                 side=side,
                 price=price,
                 size=size,
-                is_paper=False
+                is_paper=False,
+                market_name=market_name
             )
 
             self._active_orders[order_key] = {
@@ -1373,7 +1382,8 @@ class TradingBot:
         side: str,
         price: float,
         size: float,
-        outcome: str
+        outcome: str,
+        market_name: Optional[str] = None
     ) -> Optional[str]:
         """
         Simulate a paper trade order.
@@ -1422,7 +1432,8 @@ class TradingBot:
             price=price,
             size=size,
             is_paper=True,
-            status=OrderStatus.FILLED
+            status=OrderStatus.FILLED,
+            market_name=market_name
         )
 
         # Update position immediately since paper orders always fill
@@ -1454,7 +1465,8 @@ class TradingBot:
         side: str,
         price: float,
         size: float,
-        outcome: str
+        outcome: str,
+        market_name: Optional[str] = None
     ) -> Optional[str]:
         """
         Simulate a paper trade order (UNIFIED with live trading).
@@ -1505,7 +1517,8 @@ class TradingBot:
             price=price,
             size=size,
             is_paper=True,
-            status=OrderStatus.FILLED
+            status=OrderStatus.FILLED,
+            market_name=market_name
         )
 
         # Update position immediately since paper orders always fill
@@ -1686,13 +1699,15 @@ class TradingBot:
         price: float,
         size: float,
         is_paper: bool = False,
-        status: OrderStatus = OrderStatus.OPEN
+        status: OrderStatus = OrderStatus.OPEN,
+        market_name: Optional[str] = None
     ) -> None:
         """Record a trade in the database."""
         async with async_session_maker() as session:
             trade = Trade(
                 order_id=order_id,
                 market_id=market_id,
+                market_name=market_name,
                 token_id=token_id,
                 side=Side.BUY if side.lower() == "buy" else Side.SELL,
                 price=price,

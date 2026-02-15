@@ -100,12 +100,14 @@ export interface HealthResponse {
 
 export interface TradeAnalysisRow {
   timestamp: string;
+  market_name: string | null;
   security: string;
   buy_price: number | null;
   sell_price: number | null;
   profit_loss: number;
   cumulative_profit: number;
   cumulative_equity: number;
+  is_auto_squared_off: boolean;
 }
 
 export interface PerformanceMetrics {

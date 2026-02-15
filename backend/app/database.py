@@ -41,6 +41,7 @@ class Trade(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     order_id = Column(String(100), unique=True, index=True)
     market_id = Column(String(100), index=True)
+    market_name = Column(String(500), nullable=True)  # Market title/question
     token_id = Column(String(100))
     side = Column(SQLEnum(Side))
     price = Column(Float)
