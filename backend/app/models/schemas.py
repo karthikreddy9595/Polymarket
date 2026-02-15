@@ -34,6 +34,7 @@ class TradeResponse(BaseModel):
     filled_size: float
     status: OrderStatusEnum
     pnl: float
+    outcome: Optional[str] = None  # YES or NO (security type)
     created_at: datetime
     updated_at: datetime
 

@@ -9,6 +9,7 @@ export interface Trade {
   filled_size: number;
   status: 'pending' | 'open' | 'filled' | 'partially_filled' | 'cancelled' | 'failed';
   pnl: number;
+  outcome?: string;  // YES or NO
   created_at: string;
   updated_at: string;
 }

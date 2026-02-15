@@ -3,10 +3,10 @@
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import select, func
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..database import get_db, Position, Trade, BotState, OrderStatus, get_or_create_bot_state
+from ..database import get_db, Position, get_or_create_bot_state
 from ..models.schemas import PositionResponse, PnLSummary
 
 router = APIRouter(prefix="/api/positions", tags=["positions"])
@@ -36,46 +36,30 @@ async def get_positions(
 async def get_pnl_summary(
     db: AsyncSession = Depends(get_db)
 ):
-    """Get P&L summary including realized and unrealized P&L."""
-    # Get bot state for totals
+    """Get P&L summary using BotState values (updated by trading bot)."""
+    # Get bot state - this is the source of truth for P&L and win/loss stats
     bot_state = await get_or_create_bot_state(db)
 
-    # Calculate realized P&L from closed trades
-    realized_query = select(func.sum(Trade.pnl)).where(
-        Trade.status == OrderStatus.FILLED
-    )
-    realized_result = await db.execute(realized_query)
-    realized_pnl = realized_result.scalar() or 0.0
-
-    # Get all positions for unrealized P&L
+    # Get all positions for display
     positions_result = await db.execute(
         select(Position).where(Position.quantity > 0)
     )
     positions = positions_result.scalars().all()
 
-    unrealized_pnl = sum(p.current_pnl for p in positions)
-    total_pnl = realized_pnl + unrealized_pnl
+    # Use BotState values - these are properly updated by the trading bot
+    total_pnl = bot_state.total_pnl
+    winning_trades = bot_state.wins
+    losing_trades = bot_state.losses
+    total_trades = bot_state.trades_count
 
-    # Get trade statistics
-    trades_count_result = await db.execute(select(func.count()).select_from(Trade))
-    total_trades = trades_count_result.scalar() or 0
-
-    winning_result = await db.execute(
-        select(func.count()).select_from(Trade).where(Trade.pnl > 0)
-    )
-    winning_trades = winning_result.scalar() or 0
-
-    losing_result = await db.execute(
-        select(func.count()).select_from(Trade).where(Trade.pnl < 0)
-    )
-    losing_trades = losing_result.scalar() or 0
-
-    win_rate = (winning_trades / total_trades * 100) if total_trades > 0 else 0.0
+    # Calculate win rate from BotState values
+    total_completed = winning_trades + losing_trades
+    win_rate = (winning_trades / total_completed * 100) if total_completed > 0 else 0.0
 
     return PnLSummary(
         total_pnl=total_pnl,
-        realized_pnl=realized_pnl,
-        unrealized_pnl=unrealized_pnl,
+        realized_pnl=total_pnl,  # For compatibility - all P&L from completed trades
+        unrealized_pnl=0.0,  # Not tracking unrealized separately anymore
         total_trades=total_trades,
         winning_trades=winning_trades,
         losing_trades=losing_trades,

@@ -57,6 +57,7 @@ export default function TradeHistory() {
               <thead>
                 <tr className="text-gray-400 text-left border-b border-gray-700">
                   <th className="pb-2">Side</th>
+                  <th className="pb-2">Security</th>
                   <th className="pb-2">Price</th>
                   <th className="pb-2">Size</th>
                   <th className="pb-2">Status</th>
@@ -78,6 +79,17 @@ export default function TradeHistory() {
                         }`}
                       >
                         {trade.side.toUpperCase()}
+                      </span>
+                    </td>
+                    <td className="py-3">
+                      <span
+                        className={`px-2 py-1 rounded text-xs font-medium ${
+                          trade.outcome === 'YES'
+                            ? 'bg-green-900 text-green-300'
+                            : 'bg-red-900 text-red-300'
+                        }`}
+                      >
+                        {trade.outcome === 'YES' ? 'UP' : trade.outcome === 'NO' ? 'DOWN' : 'UP'}
                       </span>
                     </td>
                     <td className="py-3 text-white">{trade.price.toFixed(3)}</td>

@@ -51,32 +51,6 @@ export default function PnLDisplay() {
         </div>
       </div>
 
-      {/* Realized / Unrealized */}
-      <div className="grid grid-cols-2 gap-4 mb-4">
-        <div className="p-3 bg-gray-700 rounded-lg">
-          <p className="text-xs text-gray-400">Realized</p>
-          <p
-            className={`text-lg font-semibold ${
-              (pnl?.realized_pnl ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'
-            }`}
-          >
-            {(pnl?.realized_pnl ?? 0) >= 0 ? '+' : ''}
-            {pnl?.realized_pnl.toFixed(4) ?? '0.0000'}
-          </p>
-        </div>
-        <div className="p-3 bg-gray-700 rounded-lg">
-          <p className="text-xs text-gray-400">Unrealized</p>
-          <p
-            className={`text-lg font-semibold ${
-              (pnl?.unrealized_pnl ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'
-            }`}
-          >
-            {(pnl?.unrealized_pnl ?? 0) >= 0 ? '+' : ''}
-            {pnl?.unrealized_pnl.toFixed(4) ?? '0.0000'}
-          </p>
-        </div>
-      </div>
-
       {/* Trade Statistics */}
       <div className="grid grid-cols-3 gap-3">
         <div className="p-3 bg-gray-700 rounded-lg text-center">
