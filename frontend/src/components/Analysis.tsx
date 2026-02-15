@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { getAnalysis, exportTrades, AnalysisFilters } from '../services/api';
 import {
@@ -14,12 +14,16 @@ import {
   Cell,
   BarChart,
   Bar,
+  ReferenceLine,
 } from 'recharts';
-import { ArrowLeft, TrendingUp, TrendingDown, Activity, Target, Shield, Zap, Download, Filter, X } from 'lucide-react';
+import { ArrowLeft, TrendingUp, TrendingDown, Activity, Target, Shield, Zap, Download, Filter, X, ChevronUp, ChevronDown, Search } from 'lucide-react';
 
 interface AnalysisProps {
   onBack: () => void;
 }
+
+type SortField = 'timestamp' | 'profit_loss' | 'cumulative_profit' | 'security';
+type SortOrder = 'asc' | 'desc';
 
 function Analysis({ onBack }: AnalysisProps) {
   const [filters, setFilters] = useState<AnalysisFilters>({});
@@ -27,6 +31,13 @@ function Analysis({ onBack }: AnalysisProps) {
   const [localStartDate, setLocalStartDate] = useState('');
   const [localEndDate, setLocalEndDate] = useState('');
   const [localSecurity, setLocalSecurity] = useState('');
+
+  // Table sorting and filtering state
+  const [tableSortField, setTableSortField] = useState<SortField>('timestamp');
+  const [tableSortOrder, setTableSortOrder] = useState<SortOrder>('desc');
+  const [tableSearchQuery, setTableSearchQuery] = useState('');
+  const [tableSecurityFilter, setTableSecurityFilter] = useState<string>('');
+  const [tablePnlFilter, setTablePnlFilter] = useState<string>('');
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['analysis', filters],
@@ -55,6 +66,113 @@ function Analysis({ onBack }: AnalysisProps) {
 
   const hasActiveFilters = filters.startDate || filters.endDate || filters.security;
 
+  // Extract data from query result
+  const metrics = data?.metrics;
+  const trades = data?.trades || [];
+
+  // Sorted and filtered trades for table display - must be before any conditional returns
+  const sortedAndFilteredTrades = useMemo(() => {
+    if (!trades || trades.length === 0) return [];
+
+    let filtered = [...trades];
+
+    // Apply search filter (market name)
+    if (tableSearchQuery) {
+      const query = tableSearchQuery.toLowerCase();
+      filtered = filtered.filter(trade =>
+        trade.market_name?.toLowerCase()?.includes(query)
+      );
+    }
+
+    // Apply security filter
+    if (tableSecurityFilter) {
+      filtered = filtered.filter(trade => trade.security === tableSecurityFilter);
+    }
+
+    // Apply P&L filter
+    if (tablePnlFilter === 'profit') {
+      filtered = filtered.filter(trade => (trade.profit_loss ?? 0) > 0);
+    } else if (tablePnlFilter === 'loss') {
+      filtered = filtered.filter(trade => (trade.profit_loss ?? 0) < 0);
+    }
+
+    // Apply sorting
+    filtered.sort((a, b) => {
+      let comparison = 0;
+      switch (tableSortField) {
+        case 'timestamp':
+          const timeA = a.timestamp ? new Date(a.timestamp).getTime() : 0;
+          const timeB = b.timestamp ? new Date(b.timestamp).getTime() : 0;
+          comparison = timeA - timeB;
+          break;
+        case 'profit_loss':
+          comparison = (a.profit_loss ?? 0) - (b.profit_loss ?? 0);
+          break;
+        case 'cumulative_profit':
+          comparison = (a.cumulative_profit ?? 0) - (b.cumulative_profit ?? 0);
+          break;
+        case 'security':
+          comparison = (a.security ?? '').localeCompare(b.security ?? '');
+          break;
+      }
+      return tableSortOrder === 'asc' ? comparison : -comparison;
+    });
+
+    return filtered;
+  }, [trades, tableSearchQuery, tableSecurityFilter, tablePnlFilter, tableSortField, tableSortOrder]);
+
+  // Show recent 20 trades in the P&L chart (sorted by timestamp ascending for chronological view)
+  const pnlData = useMemo(() => {
+    if (!trades || trades.length === 0) return [];
+
+    const sortedTrades = [...trades].sort((a, b) => {
+      const timeA = a.timestamp ? new Date(a.timestamp).getTime() : 0;
+      const timeB = b.timestamp ? new Date(b.timestamp).getTime() : 0;
+      return timeA - timeB;
+    });
+    // Take only the last 20 trades for the bar chart
+    const recentTrades = sortedTrades.slice(-20);
+    const startIndex = sortedTrades.length - recentTrades.length;
+    return recentTrades.map((trade, index) => ({
+      name: `#${startIndex + index + 1}`,
+      pnl: trade.profit_loss ?? 0,
+      cumulative: trade.cumulative_profit ?? 0,
+      timestamp: trade.timestamp ?? '',
+    }));
+  }, [trades]);
+
+  // Prepare data for charts
+  const equityData = useMemo(() => {
+    if (!metrics?.equity_curve) return [];
+    return metrics.equity_curve.map((value, index) => ({
+      name: metrics?.timestamps?.[index] || `${index}`,
+      equity: value,
+      drawdown: metrics?.drawdown_curve?.[index] || 0,
+    }));
+  }, [metrics]);
+
+  const winLossData = useMemo(() => [
+    { name: 'Wins', value: metrics?.winning_trades || 0, color: '#10B981' },
+    { name: 'Losses', value: metrics?.losing_trades || 0, color: '#EF4444' },
+  ], [metrics?.winning_trades, metrics?.losing_trades]);
+
+  // Handle sort column click
+  const handleSort = (field: SortField) => {
+    if (tableSortField === field) {
+      setTableSortOrder(prev => prev === 'asc' ? 'desc' : 'asc');
+    } else {
+      setTableSortField(field);
+      setTableSortOrder('desc');
+    }
+  };
+
+  // Sort indicator component
+  const SortIndicator = ({ field }: { field: SortField }) => {
+    if (tableSortField !== field) return null;
+    return tableSortOrder === 'asc' ? <ChevronUp size={14} /> : <ChevronDown size={14} />;
+  };
+
+  // Early returns for loading/error states - AFTER all hooks
   if (isLoading) {
     return (
       <div className="min-h-screen bg-gray-900 p-6 flex items-center justify-center">
@@ -70,28 +188,6 @@ function Analysis({ onBack }: AnalysisProps) {
       </div>
     );
   }
-
-  const metrics = data?.metrics;
-  const trades = data?.trades || [];
-
-  // Prepare data for charts - show ALL datapoints
-  const equityData = metrics?.equity_curve.map((value, index) => ({
-    name: metrics.timestamps[index] || `${index}`,
-    equity: value,
-    drawdown: metrics.drawdown_curve[index] || 0,
-  })) || [];
-
-  const winLossData = [
-    { name: 'Wins', value: metrics?.winning_trades || 0, color: '#10B981' },
-    { name: 'Losses', value: metrics?.losing_trades || 0, color: '#EF4444' },
-  ];
-
-  // Show ALL trades in the P&L chart
-  const pnlData = trades.map((trade, index) => ({
-    name: `#${index + 1}`,
-    pnl: trade.profit_loss,
-    cumulative: trade.cumulative_profit,
-  }));
 
   return (
     <div className="min-h-screen bg-gray-900 p-6">
@@ -336,29 +432,37 @@ function Analysis({ onBack }: AnalysisProps) {
             </ResponsiveContainer>
           </div>
 
-          {/* P&L per Trade - Shows ALL trades */}
+          {/* P&L per Trade - Shows recent 20 trades */}
           <div className="bg-gray-800 rounded-lg p-4 lg:col-span-2">
             <h3 className="text-lg font-semibold text-white mb-4">
-              P&L per Trade ({pnlData.length} trades)
+              P&L per Trade {trades.length > 20 ? `(Recent ${pnlData.length} of ${trades.length})` : `(${pnlData.length} trades)`}
             </h3>
             <ResponsiveContainer width="100%" height={200}>
-              <BarChart data={pnlData}>
+              <BarChart data={pnlData} margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
                 <XAxis
                   dataKey="name"
                   stroke="#9CA3AF"
                   fontSize={10}
-                  interval={Math.max(0, Math.floor(pnlData.length / 20) - 1)}
+                  interval={pnlData.length <= 20 ? 0 : Math.floor(pnlData.length / 15)}
+                  tick={{ fill: '#9CA3AF' }}
                 />
-                <YAxis stroke="#9CA3AF" fontSize={12} />
+                <YAxis
+                  stroke="#9CA3AF"
+                  fontSize={12}
+                  tickFormatter={(value) => value.toFixed(2)}
+                  domain={['auto', 'auto']}
+                />
                 <Tooltip
-                  contentStyle={{ backgroundColor: '#1F2937', border: 'none' }}
+                  contentStyle={{ backgroundColor: '#1F2937', border: 'none', borderRadius: '8px' }}
                   labelStyle={{ color: '#9CA3AF' }}
+                  formatter={(value) => [`$${Number(value).toFixed(4)}`, 'P&L']}
                 />
+                <ReferenceLine y={0} stroke="#6B7280" strokeDasharray="3 3" />
                 <Bar
                   dataKey="pnl"
-                  fill="#10B981"
                   radius={[2, 2, 0, 0]}
+                  maxBarSize={50}
                 >
                   {pnlData.map((entry, index) => (
                     <Cell
@@ -435,47 +539,132 @@ function Analysis({ onBack }: AnalysisProps) {
         <div className="bg-gray-800 rounded-lg p-4">
           <div className="flex items-center justify-between mb-4">
             <h3 className="text-lg font-semibold text-white">
-              Trade History ({trades.length} trades)
+              Trade History ({sortedAndFilteredTrades.length} of {trades.length} trades)
             </h3>
           </div>
+
+          {/* Table Filters */}
+          <div className="flex flex-wrap items-center gap-3 mb-4 p-3 bg-gray-700/50 rounded-lg">
+            {/* Search */}
+            <div className="relative flex-1 min-w-[200px]">
+              <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400" size={16} />
+              <input
+                type="text"
+                placeholder="Search market name..."
+                value={tableSearchQuery}
+                onChange={(e) => setTableSearchQuery(e.target.value)}
+                className="w-full pl-9 pr-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white text-sm focus:outline-none focus:border-purple-500"
+              />
+            </div>
+
+            {/* Security Filter */}
+            <select
+              value={tableSecurityFilter}
+              onChange={(e) => setTableSecurityFilter(e.target.value)}
+              className="px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white text-sm focus:outline-none focus:border-purple-500"
+            >
+              <option value="">All Securities</option>
+              <option value="Up">Up</option>
+              <option value="Down">Down</option>
+            </select>
+
+            {/* P&L Filter */}
+            <select
+              value={tablePnlFilter}
+              onChange={(e) => setTablePnlFilter(e.target.value)}
+              className="px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white text-sm focus:outline-none focus:border-purple-500"
+            >
+              <option value="">All P&L</option>
+              <option value="profit">Profits Only</option>
+              <option value="loss">Losses Only</option>
+            </select>
+
+            {/* Clear Filters */}
+            {(tableSearchQuery || tableSecurityFilter || tablePnlFilter) && (
+              <button
+                onClick={() => {
+                  setTableSearchQuery('');
+                  setTableSecurityFilter('');
+                  setTablePnlFilter('');
+                }}
+                className="flex items-center gap-1 px-3 py-2 text-gray-400 hover:text-white text-sm"
+              >
+                <X size={16} />
+                Clear
+              </button>
+            )}
+          </div>
+
           <div className="overflow-x-auto max-h-[600px] overflow-y-auto">
             <table className="w-full text-sm">
               <thead className="sticky top-0 bg-gray-800">
                 <tr className="text-gray-400 border-b border-gray-700">
                   <th className="text-left py-3 px-4">#</th>
-                  <th className="text-left py-3 px-4">Timestamp</th>
-                  <th className="text-left py-3 px-4">Market</th>
-                  <th className="text-left py-3 px-4">Security</th>
+                  <th
+                    className="text-left py-3 px-4 cursor-pointer hover:text-white select-none"
+                    onClick={() => handleSort('timestamp')}
+                  >
+                    <span className="flex items-center gap-1">
+                      Timestamp
+                      <SortIndicator field="timestamp" />
+                    </span>
+                  </th>
+                  <th className="text-left py-3 px-4 min-w-[300px]">Market</th>
+                  <th
+                    className="text-left py-3 px-4 cursor-pointer hover:text-white select-none"
+                    onClick={() => handleSort('security')}
+                  >
+                    <span className="flex items-center gap-1">
+                      Security
+                      <SortIndicator field="security" />
+                    </span>
+                  </th>
                   <th className="text-right py-3 px-4">Buy Price</th>
                   <th className="text-right py-3 px-4">Sell Price</th>
-                  <th className="text-right py-3 px-4">P&L</th>
-                  <th className="text-right py-3 px-4">Cumulative P&L</th>
+                  <th
+                    className="text-right py-3 px-4 cursor-pointer hover:text-white select-none"
+                    onClick={() => handleSort('profit_loss')}
+                  >
+                    <span className="flex items-center justify-end gap-1">
+                      P&L
+                      <SortIndicator field="profit_loss" />
+                    </span>
+                  </th>
+                  <th
+                    className="text-right py-3 px-4 cursor-pointer hover:text-white select-none"
+                    onClick={() => handleSort('cumulative_profit')}
+                  >
+                    <span className="flex items-center justify-end gap-1">
+                      Cumulative P&L
+                      <SortIndicator field="cumulative_profit" />
+                    </span>
+                  </th>
                   <th className="text-right py-3 px-4">Equity</th>
                 </tr>
               </thead>
               <tbody>
-                {trades.length === 0 ? (
+                {sortedAndFilteredTrades.length === 0 ? (
                   <tr>
                     <td colSpan={9} className="text-center py-8 text-gray-500">
-                      No trades yet
+                      {trades.length === 0 ? 'No trades yet' : 'No trades match filters'}
                     </td>
                   </tr>
                 ) : (
-                  [...trades].reverse().map((trade, index) => (
+                  sortedAndFilteredTrades.map((trade, index) => (
                     <tr
                       key={index}
-                      className={`border-b border-gray-700 hover:bg-gray-750 ${
+                      className={`border-b border-gray-700 hover:bg-gray-700/50 ${
                         trade.is_auto_squared_off ? 'bg-yellow-900/20' : ''
                       }`}
                     >
-                      <td className="py-3 px-4 text-gray-500">{trades.length - index}</td>
+                      <td className="py-3 px-4 text-gray-500">{index + 1}</td>
                       <td className="py-3 px-4 text-gray-300">{trade.timestamp}</td>
-                      <td className="py-3 px-4 text-gray-300 max-w-[200px] truncate" title={trade.market_name || 'Unknown'}>
+                      <td className="py-3 px-4 text-gray-300 min-w-[300px]">
                         {trade.market_name ? (
-                          <span className="flex items-center gap-1">
-                            {trade.market_name.length > 30 ? trade.market_name.substring(0, 30) + '...' : trade.market_name}
+                          <span className="flex items-center gap-2">
+                            <span className="whitespace-normal break-words">{trade.market_name}</span>
                             {trade.is_auto_squared_off && (
-                              <span className="text-xs bg-yellow-700 text-yellow-200 px-1 rounded">Auto</span>
+                              <span className="text-xs bg-yellow-700 text-yellow-200 px-1 rounded flex-shrink-0">Auto</span>
                             )}
                           </span>
                         ) : (
@@ -486,7 +675,7 @@ function Analysis({ onBack }: AnalysisProps) {
                         <span className={`px-2 py-1 rounded text-xs font-medium ${
                           trade.security === 'Up' ? 'bg-green-900 text-green-300' : 'bg-red-900 text-red-300'
                         }`}>
-                          {trade.security}
+                          {trade.security || '-'}
                         </span>
                       </td>
                       <td className="py-3 px-4 text-right text-gray-300">
@@ -499,17 +688,17 @@ function Analysis({ onBack }: AnalysisProps) {
                         )}
                       </td>
                       <td className={`py-3 px-4 text-right font-medium ${
-                        trade.profit_loss >= 0 ? 'text-green-400' : 'text-red-400'
+                        (trade.profit_loss ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'
                       }`}>
-                        {trade.profit_loss >= 0 ? '+' : ''}{trade.profit_loss.toFixed(4)}
+                        {(trade.profit_loss ?? 0) >= 0 ? '+' : ''}{(trade.profit_loss ?? 0).toFixed(4)}
                       </td>
                       <td className={`py-3 px-4 text-right ${
-                        trade.cumulative_profit >= 0 ? 'text-green-400' : 'text-red-400'
+                        (trade.cumulative_profit ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'
                       }`}>
-                        {trade.cumulative_profit >= 0 ? '+' : ''}{trade.cumulative_profit.toFixed(4)}
+                        {(trade.cumulative_profit ?? 0) >= 0 ? '+' : ''}{(trade.cumulative_profit ?? 0).toFixed(4)}
                       </td>
                       <td className="py-3 px-4 text-right text-white font-medium">
-                        ${trade.cumulative_equity.toFixed(2)}
+                        ${(trade.cumulative_equity ?? 0).toFixed(2)}
                       </td>
                     </tr>
                   ))

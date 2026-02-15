@@ -178,7 +178,6 @@ async def get_analysis(
     # Group trades into buy-sell pairs to calculate P&L
     trade_rows: List[TradeAnalysisRow] = []
     equity_curve: List[float] = [starting_equity]
-    drawdown_curve: List[float] = [0.0]
     timestamps: List[str] = ["Start"]
     returns: List[float] = []
 
@@ -295,7 +294,8 @@ async def get_analysis(
         equity_curve.append(equity)
         timestamps.append(buy_trade.created_at.strftime("%H:%M:%S") + " (Auto)")
 
-    # Calculate drawdown curve
+    # Calculate drawdown curve (rebuild to match equity_curve length)
+    drawdown_curve = []
     peak = equity_curve[0]
     for eq in equity_curve:
         if eq > peak:
