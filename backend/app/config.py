@@ -54,6 +54,7 @@ class Settings(BaseSettings):
     stoploss: float = Field(default=0.60, description="Stoploss price - limit sell placed here")
     target: float = Field(default=0.99, description="Target price - limit sell placed here")
     order_cancel_threshold: float = Field(default=0.167, description="Cancel unfilled orders when time to close < this (minutes). Default 10 seconds = 0.167 min")
+    reentry_max_price: float = Field(default=0.9, description="Maximum price for re-entry after position cleared - skip if price > this")
 
     # Fees
     taker_fee_rate: float = Field(default=0.001, description="Taker fee rate (0.001 = 0.10% or 10 basis points)")

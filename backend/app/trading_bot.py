@@ -457,6 +457,9 @@ class TradingBot:
             return
 
         # No position - look for entry signal (price >= trigger)
+        REENTRY_MAX_PRICE = self.settings.reentry_max_price
+        is_reentry = self._live_state.positions_taken > 0
+
         logger.info(f"[{self._timestamp()}] [LIVE] Looking for entry: YES={yes_price:.4f}, NO={no_price:.4f}, trigger={TRIGGER_PRICE}, positions={self._live_state.positions_taken}/{max_positions}")
 
         await self._update_bot_state(
@@ -465,15 +468,23 @@ class TradingBot:
 
         # Check YES side for entry signal
         if yes_price >= TRIGGER_PRICE and yes_price < TARGET:
-            logger.info(f"[{self._timestamp()}] [LIVE] Entry signal triggered: YES @ {yes_price:.4f} >= {TRIGGER_PRICE}")
-            await self._place_live_entry(market=market, token_id=yes_token_id, side="YES", current_price=yes_price)
-            return
+            # Re-entry: only enter if price < REENTRY_MAX_PRICE
+            if is_reentry and yes_price >= REENTRY_MAX_PRICE:
+                logger.info(f"[{self._timestamp()}] [LIVE] Re-entry skipped: YES @ {yes_price:.4f} >= {REENTRY_MAX_PRICE} (only re-enter when price < {REENTRY_MAX_PRICE})")
+            else:
+                logger.info(f"[{self._timestamp()}] [LIVE] Entry signal triggered: YES @ {yes_price:.4f} >= {TRIGGER_PRICE}")
+                await self._place_live_entry(market=market, token_id=yes_token_id, side="YES", current_price=yes_price)
+                return
 
         # Check NO side for entry signal
         if no_price >= TRIGGER_PRICE and no_price < TARGET:
-            logger.info(f"[{self._timestamp()}] [LIVE] Entry signal triggered: NO @ {no_price:.4f} >= {TRIGGER_PRICE}")
-            await self._place_live_entry(market=market, token_id=no_token_id, side="NO", current_price=no_price)
-            return
+            # Re-entry: only enter if price < REENTRY_MAX_PRICE
+            if is_reentry and no_price >= REENTRY_MAX_PRICE:
+                logger.info(f"[{self._timestamp()}] [LIVE] Re-entry skipped: NO @ {no_price:.4f} >= {REENTRY_MAX_PRICE} (only re-enter when price < {REENTRY_MAX_PRICE})")
+            else:
+                logger.info(f"[{self._timestamp()}] [LIVE] Entry signal triggered: NO @ {no_price:.4f} >= {TRIGGER_PRICE}")
+                await self._place_live_entry(market=market, token_id=no_token_id, side="NO", current_price=no_price)
+                return
 
     async def _place_live_entry(
         self,
@@ -895,31 +906,42 @@ class TradingBot:
             return
 
         # No position - look for entry signal (price >= trigger_price)
+        REENTRY_MAX_PRICE = self.settings.reentry_max_price
+        is_reentry = self._paper_state.positions_taken > 0
+
         await self._update_bot_state(
             last_action=f"[PAPER] Watching for entry (>= {TRIGGER_PRICE}) | YES: {yes_price:.3f}, NO: {no_price:.3f}"
         )
 
         # Check YES side for entry signal (same logic as live trading)
         if yes_price >= TRIGGER_PRICE and yes_price < TARGET:
-            logger.info(f"[{self._timestamp()}] [PAPER] Entry signal: YES @ {yes_price:.4f} (>= {TRIGGER_PRICE})")
-            await self._place_paper_entry_unified(
-                market=market,
-                token_id=yes_token_id,
-                side="YES",
-                current_price=yes_price
-            )
-            return
+            # Re-entry: only enter if price < REENTRY_MAX_PRICE
+            if is_reentry and yes_price >= REENTRY_MAX_PRICE:
+                logger.info(f"[{self._timestamp()}] [PAPER] Re-entry skipped: YES @ {yes_price:.4f} >= {REENTRY_MAX_PRICE} (only re-enter when price < {REENTRY_MAX_PRICE})")
+            else:
+                logger.info(f"[{self._timestamp()}] [PAPER] Entry signal: YES @ {yes_price:.4f} (>= {TRIGGER_PRICE})")
+                await self._place_paper_entry_unified(
+                    market=market,
+                    token_id=yes_token_id,
+                    side="YES",
+                    current_price=yes_price
+                )
+                return
 
         # Check NO side for entry signal (same logic as live trading)
         if no_price >= TRIGGER_PRICE and no_price < TARGET:
-            logger.info(f"[{self._timestamp()}] [PAPER] Entry signal: NO @ {no_price:.4f} (>= {TRIGGER_PRICE})")
-            await self._place_paper_entry_unified(
-                market=market,
-                token_id=no_token_id,
-                side="NO",
-                current_price=no_price
-            )
-            return
+            # Re-entry: only enter if price < REENTRY_MAX_PRICE
+            if is_reentry and no_price >= REENTRY_MAX_PRICE:
+                logger.info(f"[{self._timestamp()}] [PAPER] Re-entry skipped: NO @ {no_price:.4f} >= {REENTRY_MAX_PRICE} (only re-enter when price < {REENTRY_MAX_PRICE})")
+            else:
+                logger.info(f"[{self._timestamp()}] [PAPER] Entry signal: NO @ {no_price:.4f} (>= {TRIGGER_PRICE})")
+                await self._place_paper_entry_unified(
+                    market=market,
+                    token_id=no_token_id,
+                    side="NO",
+                    current_price=no_price
+                )
+                return
 
         # Log when waiting for signal
         if yes_price >= TARGET:
