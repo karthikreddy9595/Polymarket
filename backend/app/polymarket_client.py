@@ -632,6 +632,54 @@ class PolymarketClient:
             logger.error(f"[ORDERBOOK] Failed to get top bids: {e}")
             return []
 
+    async def get_top_asks(self, token_id: str, count: int = 5) -> List[float]:
+        """
+        Get top N ask prices from orderbook (for buying).
+
+        When buying, we want to match against asks (what sellers are asking).
+        Returns prices sorted from lowest to highest (best asks first).
+
+        Args:
+            token_id: The token ID
+            count: Number of top asks to return (default 5)
+
+        Returns:
+            List of ask prices sorted lowest to highest, or empty list if failed
+        """
+        try:
+            orderbook = await self.get_orderbook(token_id)
+            if not orderbook:
+                logger.warning(f"[ORDERBOOK] Failed to get orderbook for {token_id[:20]}...")
+                return []
+
+            # Orderbook structure: {"bids": [{"price": "0.50", "size": "100"}, ...], "asks": [...]}
+            asks = orderbook.get("asks", [])
+
+            if not asks:
+                logger.warning(f"[ORDERBOOK] No asks found in orderbook")
+                return []
+
+            # Extract prices and sort ascending (lowest ask first - best price for buyer)
+            ask_prices = []
+            for ask in asks:
+                try:
+                    price = float(ask.get("price", 0))
+                    if price > 0:
+                        ask_prices.append(price)
+                except (ValueError, TypeError):
+                    continue
+
+            # Sort ascending and take top N (lowest asks are best for buying)
+            ask_prices.sort()
+            top_asks = ask_prices[:count]
+
+            logger.info(f"[ORDERBOOK] Top {len(top_asks)} asks: {top_asks}")
+            return top_asks
+
+        except Exception as e:
+            logger.error(f"[ORDERBOOK] Failed to get top asks: {e}")
+            return []
+
     async def get_current_price(self, token_id: str) -> Optional[float]:
         """
         Get LIVE current price for a token - NO CACHING.

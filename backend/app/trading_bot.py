@@ -527,7 +527,12 @@ class TradingBot:
         side: str,
         current_price: float
     ) -> None:
-        """Place a MARKET buy order (at current price + buffer to fill immediately)."""
+        """Place a buy order using orderbook ask prices with retry logic.
+
+        Uses orderbook ask prices for retry attempts to ensure fill.
+        Fetches top 5 ask prices and uses them sequentially for retries.
+        Falls back to price increment if orderbook unavailable.
+        """
         # CRITICAL: Final time check before placing order
         NO_BUY_THRESHOLD = 10 / 60  # 10 seconds in minutes
         market_id = market.get("id") or market.get("conditionId")
@@ -574,33 +579,127 @@ class TradingBot:
 
         TARGET = self.settings.target
         STOPLOSS = self.settings.stoploss
-        MARKET_BUY_PRICE = min(round(current_price + 0.02, 2), 0.99)
 
-        order_id = await self._place_order(
-            market=market,
-            token_id=token_id,
-            side="buy",
-            price=MARKET_BUY_PRICE,
-            size=self.settings.order_size,
-            outcome=side
-        )
+        # Retry settings for buy orders
+        MAX_BUY_RETRIES = 5
+        FALLBACK_PRICE_INCREMENT = 0.02  # Fallback if orderbook unavailable
+        FILL_CHECK_DELAY = 1.0  # Wait 1 second before checking if filled
 
-        if order_id:
-            self._live_state.buy_order_id = order_id
+        # Fetch top 5 ask prices from orderbook for smart pricing
+        top_asks = await self.client.get_top_asks(token_id, count=5)
+
+        if top_asks:
+            logger.info(f"[{self._timestamp()}] [LIVE] Using orderbook asks for buy: {top_asks}")
+            # Use orderbook ask prices for retries (already sorted lowest first)
+            buy_prices = top_asks
+        else:
+            # Fallback: generate prices by incrementing from current price
+            logger.warning(f"[{self._timestamp()}] [LIVE] Orderbook unavailable, using fallback price increment")
+            buy_prices = [
+                min(round(current_price + ((i + 1) * FALLBACK_PRICE_INCREMENT), 2), 0.99)
+                for i in range(MAX_BUY_RETRIES)
+            ]
+
+        buy_order_id = None
+        final_buy_price = buy_prices[0] if buy_prices else min(round(current_price + 0.02, 2), 0.99)
+
+        for attempt in range(1, MAX_BUY_RETRIES + 1):
+            # Check time before each attempt
+            time_to_close = await self.client.get_time_to_close(market_id)
+            if time_to_close is not None and time_to_close <= NO_BUY_THRESHOLD:
+                time_seconds = time_to_close * 60
+                logger.info(f"[{self._timestamp()}] [LIVE] BUY ABORTED: Only {time_seconds:.1f}s to expiry (< 10s)")
+                if buy_order_id:
+                    try:
+                        await self.client.cancel_order(buy_order_id)
+                        logger.info(f"[{self._timestamp()}] [LIVE] Cancelled pending buy order")
+                    except Exception as e:
+                        logger.warning(f"[{self._timestamp()}] [LIVE] Failed to cancel order: {e}")
+                return
+
+            # Get buy price for this attempt (use orderbook ask or fallback)
+            if attempt <= len(buy_prices):
+                buy_price = buy_prices[attempt - 1]
+            else:
+                # Extra fallback if we run out of orderbook prices
+                buy_price = min(round(buy_prices[-1] + 0.02, 2), 0.99)
+
+            logger.info(f"[{self._timestamp()}] [LIVE] BUY attempt {attempt}/{MAX_BUY_RETRIES}: {self.settings.order_size} @ {buy_price} (ask price)")
+
+            buy_order_id = await self._place_order(
+                market=market,
+                token_id=token_id,
+                side="buy",
+                price=buy_price,
+                size=self.settings.order_size,
+                outcome=side
+            )
+
+            if not buy_order_id:
+                logger.warning(f"[{self._timestamp()}] [LIVE] Buy order placement failed (attempt {attempt})")
+                if attempt < MAX_BUY_RETRIES:
+                    await asyncio.sleep(0.5)
+                    # Refresh orderbook for next attempt
+                    fresh_asks = await self.client.get_top_asks(token_id, count=5)
+                    if fresh_asks:
+                        buy_prices = fresh_asks
+                        logger.info(f"[{self._timestamp()}] [LIVE] Refreshed orderbook asks: {fresh_asks}")
+                continue
+
+            final_buy_price = buy_price
+
+            # Wait briefly then check if order is still active (not filled)
+            await asyncio.sleep(FILL_CHECK_DELAY)
+
+            # Check if order is still active using get_orders API
+            is_still_active = await self.client.is_order_active(buy_order_id)
+
+            if not is_still_active:
+                # Order is not in active orders - it's filled!
+                logger.info(f"[{self._timestamp()}] [LIVE] Buy order FILLED (not in active orders)")
+                break
+
+            # Double-check via balance
+            actual_balance = await self.client.get_token_balance(token_id)
+            if actual_balance and actual_balance >= self.settings.order_size * 0.9:
+                logger.info(f"[{self._timestamp()}] [LIVE] Buy confirmed via balance check (balance: {actual_balance})")
+                break
+
+            # Order still active and we don't have tokens - cancel and retry with next ask price
+            logger.warning(f"[{self._timestamp()}] [LIVE] Order still active (unfilled), cancelling and retrying with next ask price")
+
+            try:
+                await self.client.cancel_order(buy_order_id)
+                logger.info(f"[{self._timestamp()}] [LIVE] Cancelled unfilled buy order {buy_order_id[:20]}...")
+            except Exception as e:
+                logger.warning(f"[{self._timestamp()}] [LIVE] Failed to cancel order: {e}")
+
+            if attempt < MAX_BUY_RETRIES:
+                # Refresh orderbook for next attempt to get latest ask prices
+                fresh_asks = await self.client.get_top_asks(token_id, count=5)
+                if fresh_asks:
+                    buy_prices = fresh_asks
+                    logger.info(f"[{self._timestamp()}] [LIVE] Refreshed orderbook asks: {fresh_asks}")
+                await asyncio.sleep(0.5)
+
+        if buy_order_id:
+            self._live_state.buy_order_id = buy_order_id
             self._live_state.entry_side = side
             self._live_state.entry_token_id = token_id
-            self._live_state.entry_price = current_price
+            self._live_state.entry_price = final_buy_price
             self._live_state.buy_filled = False  # Will be confirmed via positions API
             self._live_state.position_open = True
 
             # Calculate and store stoploss based on entry price (bought price - 0.15)
-            calculated_sl = self._calculate_stoploss_price(current_price, 0.15)
+            calculated_sl = self._calculate_stoploss_price(final_buy_price, 0.15)
             self._live_state.stoploss_price = calculated_sl
-            logger.info(f"[{self._timestamp()}] [LIVE] BUY {side} @ {current_price:.4f} | Target: {TARGET} | SL: {calculated_sl:.4f}")
+            logger.info(f"[{self._timestamp()}] [LIVE] BUY {side} @ {final_buy_price:.4f} | Target: {TARGET} | SL: {calculated_sl:.4f}")
 
             await self._update_bot_state(
                 last_action=f"[LIVE] Waiting for position confirmation..."
             )
+        else:
+            logger.error(f"[{self._timestamp()}] [LIVE] BUY FAILED after {MAX_BUY_RETRIES} attempts")
 
     async def _check_order_filled(self) -> bool:
         """Check if buy order is filled using getOrder and getTrades APIs.
