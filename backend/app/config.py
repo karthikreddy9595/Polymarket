@@ -47,6 +47,10 @@ class Settings(BaseSettings):
     time_threshold: int = Field(default=3, description="Minutes before close to start trading")
     max_positions_per_market: int = Field(default=3, description="Maximum positions (buy-sell cycles) per market")
 
+    # BTC Price Movement Filter
+    btc_price_filter_enabled: bool = Field(default=True, description="Enable BTC price movement filter for order placement")
+    btc_min_price_difference: float = Field(default=10.0, description="Minimum BTC price difference from market open to place orders")
+
     # Strategy Parameters (configurable entry/exit levels)
     trigger_price: float = Field(default=0.75, description="Entry trigger - buy when price >= this")
     entry_min: float = Field(default=0.78, description="Minimum price for entry signal range (legacy)")

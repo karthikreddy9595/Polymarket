@@ -16,6 +16,7 @@ from .database import (
     async_session_maker, get_or_create_bot_state
 )
 from .polymarket_client import PolymarketClient, get_polymarket_client
+from .btc_price_service import BTCPriceService, get_btc_price_service
 
 logger = logging.getLogger(__name__)
 
@@ -129,12 +130,14 @@ class TradingBot:
     def __init__(self):
         self.settings = get_settings()
         self.client: Optional[PolymarketClient] = None
+        self.btc_service: Optional[BTCPriceService] = None
         self._running = False
         self._task: Optional[asyncio.Task] = None
         self._current_market: Optional[Dict[str, Any]] = None
         self._active_orders: Dict[str, Dict[str, Any]] = {}
         self._paper_state = PaperTradingState()
         self._live_state = LiveTradingState()  # Live trading state
+        self._price_to_beat_fetched = False  # Track if market open price has been fetched for current market
 
     @property
     def is_running(self) -> bool:
@@ -174,12 +177,19 @@ class TradingBot:
 
         self._running = True
 
+        # Initialize BTC price service if filter is enabled
+        if self.settings.btc_price_filter_enabled:
+            self.btc_service = await get_btc_price_service()
+            logger.info(f"[BTC] Price filter enabled (min difference: ${self.settings.btc_min_price_difference})")
+
         # Reset trading state
         self._paper_state.reset()
         self._live_state.reset()
+        self._price_to_beat_fetched = False
 
         mode = "PAPER" if self.settings.paper_trading else "LIVE"
-        logger.info(f"[{mode}] Bot started | Trigger: {self.settings.trigger_price} | Target: {self.settings.target} | SL: {self.settings.stoploss} | Size: {self.settings.order_size}")
+        btc_filter_status = f"BTC Filter: ${self.settings.btc_min_price_difference}" if self.settings.btc_price_filter_enabled else "BTC Filter: OFF"
+        logger.info(f"[{mode}] Bot started | Trigger: {self.settings.trigger_price} | Target: {self.settings.target} | SL: {self.settings.stoploss} | Size: {self.settings.order_size} | {btc_filter_status}")
 
         # Update database state
         await self._update_bot_state(
@@ -209,6 +219,11 @@ class TradingBot:
         # Cancel all open orders
         if self.client and self.client.is_connected:
             await self.client.cancel_all_orders()
+
+        # Stop BTC price service
+        if self.btc_service:
+            await self.btc_service.stop()
+            self.btc_service = None
 
         # Update database state
         await self._update_bot_state(
@@ -260,9 +275,28 @@ class TradingBot:
                         logger.info(f"[{self._timestamp()}] [LIVE] New market: {market_title}")
                         self._paper_state.reset()
                         self._live_state.reset()
+                        self._price_to_beat_fetched = False
+                        # Clear old market open price
+                        if self.btc_service:
+                            self.btc_service.clear_price_to_beat()
 
                     self._current_market = market
                     current_market_id = market_id
+
+                    # Fetch market open price during the early buffer period (first 2 minutes)
+                    # This runs once per market when time_to_close > EARLY_BUY_THRESHOLD
+                    if self.settings.btc_price_filter_enabled and self.btc_service and not self._price_to_beat_fetched:
+                        EARLY_BUY_THRESHOLD = 3.5  # Same as in strategy
+                        if time_to_close > EARLY_BUY_THRESHOLD:
+                            market_slug = market.get("slug")
+                            if market_slug:
+                                logger.info(f"[{self._timestamp()}] [BTC] Fetching market open price for {market_slug}...")
+                                price = await self.btc_service.fetch_price_to_beat(market_slug)
+                                if price:
+                                    self._price_to_beat_fetched = True
+                                    logger.info(f"[{self._timestamp()}] [BTC] Market open: ${price:,.2f}")
+                                else:
+                                    logger.warning(f"[{self._timestamp()}] [BTC] Could not fetch market open price")
 
                     await self._update_bot_state(
                         current_market_id=market_id,
@@ -502,6 +536,41 @@ class TradingBot:
             time_seconds = time_to_close * 60
             logger.info(f"[{self._timestamp()}] [LIVE] ORDER BLOCKED: Only {time_seconds:.1f}s to expiry (< 10s)")
             return
+
+        # BTC Price Movement Filter - only place order if BTC moved enough from market open
+        if self.settings.btc_price_filter_enabled and self.btc_service:
+            should_place, price_info = await self.btc_service.should_place_order(
+                min_difference=self.settings.btc_min_price_difference
+            )
+            if not should_place:
+                abs_diff = price_info.get('abs_difference', 0)
+                min_req = price_info.get('min_required', self.settings.btc_min_price_difference)
+                market_open = price_info.get('price_to_beat')
+                live_price = price_info.get('live_price')
+
+                if market_open and live_price:
+                    logger.info(
+                        f"[{self._timestamp()}] [LIVE] ORDER BLOCKED by BTC filter: "
+                        f"Live ${live_price:,.2f} vs Open ${market_open:,.2f} | "
+                        f"|${abs_diff:,.2f}| < ${min_req:,.2f}"
+                    )
+                else:
+                    logger.info(f"[{self._timestamp()}] [LIVE] ORDER BLOCKED: BTC price data unavailable")
+
+                await self._update_bot_state(
+                    last_action=f"[BTC] Blocked: |${abs_diff:,.2f}| < ${min_req:,.2f}"
+                )
+                return
+            else:
+                direction = price_info.get('direction', 'N/A')
+                abs_diff = price_info.get('abs_difference', 0)
+                market_open = price_info.get('price_to_beat')
+                live_price = price_info.get('live_price')
+                logger.info(
+                    f"[{self._timestamp()}] [LIVE] ORDER ALLOWED by BTC filter: "
+                    f"Live ${live_price:,.2f} vs Open ${market_open:,.2f} | "
+                    f"Diff: ${abs_diff:,.2f} {direction}"
+                )
 
         TARGET = self.settings.target
         STOPLOSS = self.settings.stoploss
@@ -1039,6 +1108,37 @@ class TradingBot:
             time_seconds = time_to_close * 60
             logger.info(f"[{self._timestamp()}] [PAPER] ORDER BLOCKED: Only {time_seconds:.1f}s to expiry (< 10s)")
             return
+
+        # BTC Price Movement Filter - only place order if BTC moved enough from market open
+        if self.settings.btc_price_filter_enabled and self.btc_service:
+            should_place, price_info = await self.btc_service.should_place_order(
+                min_difference=self.settings.btc_min_price_difference
+            )
+            if not should_place:
+                abs_diff = price_info.get('abs_difference', 0)
+                min_req = price_info.get('min_required', self.settings.btc_min_price_difference)
+                market_open = price_info.get('price_to_beat')
+                live_price = price_info.get('live_price')
+
+                if market_open and live_price:
+                    logger.info(
+                        f"[{self._timestamp()}] [PAPER] ORDER BLOCKED by BTC filter: "
+                        f"Live ${live_price:,.2f} vs Open ${market_open:,.2f} | "
+                        f"|${abs_diff:,.2f}| < ${min_req:,.2f}"
+                    )
+                else:
+                    logger.info(f"[{self._timestamp()}] [PAPER] ORDER BLOCKED: BTC price data unavailable")
+                return
+            else:
+                direction = price_info.get('direction', 'N/A')
+                abs_diff = price_info.get('abs_difference', 0)
+                market_open = price_info.get('price_to_beat')
+                live_price = price_info.get('live_price')
+                logger.info(
+                    f"[{self._timestamp()}] [PAPER] ORDER ALLOWED by BTC filter: "
+                    f"Live ${live_price:,.2f} vs Open ${market_open:,.2f} | "
+                    f"Diff: ${abs_diff:,.2f} {direction}"
+                )
 
         TRIGGER_PRICE = self.settings.trigger_price
         TARGET = self.settings.target
