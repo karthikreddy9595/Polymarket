@@ -12,7 +12,7 @@ from urllib.parse import quote
 import aiohttp
 import requests
 from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import ApiCreds, OrderArgs, OrderType, PartialCreateOrderOptions, BalanceAllowanceParams, AssetType
+from py_clob_client.clob_types import ApiCreds, OrderArgs, MarketOrderArgs, OrderType, PartialCreateOrderOptions, BalanceAllowanceParams, AssetType
 from py_clob_client.order_builder.constants import BUY, SELL
 
 from .config import get_settings
@@ -228,6 +228,86 @@ class PolymarketClient:
             logger.error(f"[LIVE] Order failed: {e}")
             return None
 
+    async def place_market_order(
+        self,
+        token_id: str,
+        side: str,
+        amount: float,
+        price: float = None,
+        tick_size: str = "0.01",
+        neg_risk: bool = False
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Place a FOK (Fill-Or-Kill) market order that executes immediately or cancels entirely.
+
+        Args:
+            token_id: The token ID to trade
+            side: "buy" or "sell"
+            amount: For BUY - dollar amount to spend. For SELL - number of shares to sell.
+            price: Price at which to execute (should be marketable - for BUY use high price, for SELL use low price)
+            tick_size: Minimum price increment (from market data)
+            neg_risk: Whether this is a negative risk market
+
+        Returns:
+            Order response dict or None if failed
+        """
+        if not self.is_connected:
+            logger.error("[FOK] ❌ Client not connected")
+            return None
+
+        try:
+            logger.info(f"[FOK] 🚀 Placing FOK market order: {side.upper()} amount={amount} token={token_id[:20]}...")
+
+            # Ensure proper allowance is set before placing order
+            if side.lower() == "sell":
+                logger.info(f"[FOK] 📋 Setting conditional token allowance for SELL...")
+                await self.ensure_conditional_allowance(token_id)
+            else:
+                logger.info(f"[FOK] 📋 Setting collateral allowance for BUY...")
+                await self.ensure_collateral_allowance()
+
+            order_side = BUY if side.lower() == "buy" else SELL
+
+            # Create market order args with FOK type (as per py-clob-client docs)
+            # FOK orders execute immediately at best available price or cancel entirely
+            market_order_args = MarketOrderArgs(
+                token_id=token_id,
+                amount=amount,
+                side=order_side,
+                order_type=OrderType.FOK,  # FOK order type for immediate fill
+            )
+
+            logger.info(f"[FOK] 📝 MarketOrderArgs created: token={token_id[:20]}..., amount={amount}, side={side}, type=FOK")
+
+            # Create the market order (signs it)
+            logger.info(f"[FOK] ✍️ Creating and signing market order...")
+            signed_order = await self._run_sync(
+                lambda: self.client.create_market_order(market_order_args)
+            )
+            logger.info(f"[FOK] ✅ Market order signed successfully")
+
+            # Post the order with FOK type
+            logger.info(f"[FOK] 📤 Posting FOK order to exchange...")
+            result = await self._run_sync(
+                lambda: self.client.post_order(signed_order, OrderType.FOK)
+            )
+
+            if result:
+                order_id = result.get("orderID") or result.get("id") or "unknown"
+                status = result.get("status", "unknown")
+                logger.info(f"[FOK] ✅ FOK ORDER SUCCESS: {side.upper()} ${amount} | OrderID: {order_id[:20] if len(str(order_id)) > 20 else order_id}... | Status: {status}")
+                logger.info(f"[FOK] 📊 Full response: {result}")
+            else:
+                logger.warning(f"[FOK] ⚠️ FOK order returned None result")
+
+            return result
+
+        except Exception as e:
+            logger.error(f"[FOK] ❌ FOK market order FAILED: {e}")
+            import traceback
+            logger.error(f"[FOK] 📋 Traceback: {traceback.format_exc()}")
+            return None
+
     async def cancel_order(self, order_id: str) -> bool:
         """Cancel an existing order."""
         if not self.is_connected:
@@ -251,15 +331,105 @@ class PolymarketClient:
             return False
 
     async def get_order(self, order_id: str) -> Optional[Dict[str, Any]]:
-        """Get order details by ID."""
+        """Get order details by ID using get_order API."""
         if not self.is_connected or not self.client:
+            logger.error(f"[GET_ORDER] Client not connected")
             return None
 
         try:
-            return await self._run_sync(lambda: self.client.get_order(order_id))
+            result = await self._run_sync(lambda: self.client.get_order(order_id))
+            logger.info(f"[GET_ORDER] Order {order_id[:20]}... response: {result}")
+            return result
         except Exception as e:
-            logger.error(f"Failed to get order: {e}")
+            logger.error(f"[GET_ORDER] Failed to get order {order_id[:20]}...: {e}")
             return None
+
+    async def check_order_status(self, order_id: str) -> Dict[str, Any]:
+        """
+        Check order status using get_order API.
+
+        Returns dict with:
+            - status: str (LIVE, MATCHED, CANCELLED, etc.)
+            - is_filled: bool (True if fully filled)
+            - is_partial: bool (True if partially filled)
+            - is_active: bool (True if still active/open)
+            - size_matched: float (amount filled)
+            - original_size: float (original order size)
+            - fill_percent: float (percentage filled)
+            - raw_order: dict (full order response)
+        """
+        result = {
+            "status": "UNKNOWN",
+            "is_filled": False,
+            "is_partial": False,
+            "is_active": False,
+            "size_matched": 0.0,
+            "original_size": 0.0,
+            "fill_percent": 0.0,
+            "raw_order": None
+        }
+
+        try:
+            order = await self.get_order(order_id)
+
+            if not order:
+                logger.warning(f"[ORDER_STATUS] No order data returned for {order_id[:20]}...")
+                result["status"] = "NOT_FOUND"
+                return result
+
+            result["raw_order"] = order
+
+            # Extract status - could be in different fields
+            status = order.get("status", "").upper()
+            result["status"] = status
+
+            # Extract sizes
+            size_matched_str = order.get("size_matched") or order.get("sizeMatched") or "0"
+            original_size_str = order.get("original_size") or order.get("originalSize") or order.get("size") or "0"
+
+            try:
+                result["size_matched"] = float(size_matched_str)
+                result["original_size"] = float(original_size_str)
+            except (ValueError, TypeError):
+                result["size_matched"] = 0.0
+                result["original_size"] = 0.0
+
+            # Calculate fill percentage
+            if result["original_size"] > 0:
+                result["fill_percent"] = (result["size_matched"] / result["original_size"]) * 100
+
+            # Determine fill status based on status field
+            # Status values: LIVE, MATCHED, CANCELLED, EXPIRED, etc.
+            if status in ["MATCHED", "FILLED"]:
+                result["is_filled"] = True
+                result["is_active"] = False
+            elif status in ["LIVE", "OPEN", "PENDING"]:
+                result["is_active"] = True
+                # Check if partially filled
+                if result["size_matched"] > 0 and result["size_matched"] < result["original_size"]:
+                    result["is_partial"] = True
+            elif status in ["CANCELLED", "EXPIRED", "REJECTED"]:
+                result["is_active"] = False
+                # Could be partially filled before cancel
+                if result["size_matched"] > 0:
+                    result["is_partial"] = True
+
+            # Log detailed status
+            logger.info(
+                f"[ORDER_STATUS] Order {order_id[:20]}... | "
+                f"Status: {status} | "
+                f"Filled: {result['size_matched']}/{result['original_size']} ({result['fill_percent']:.1f}%) | "
+                f"Active: {result['is_active']} | "
+                f"Fully Filled: {result['is_filled']}"
+            )
+
+            return result
+
+        except Exception as e:
+            logger.error(f"[ORDER_STATUS] Error checking order status: {e}")
+            import traceback
+            logger.error(f"[ORDER_STATUS] Traceback: {traceback.format_exc()}")
+            return result
 
     async def get_open_orders(self, market_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """Get all open orders, optionally filtered by market."""

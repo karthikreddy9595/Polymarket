@@ -30,6 +30,8 @@ class TradeAnalysisRow(BaseModel):
     cumulative_profit: float
     cumulative_equity: float
     is_auto_squared_off: bool = False  # True if trade was auto squared off (no sell found)
+    buy_status: Optional[str] = None  # Status of buy order (filled, cancelled, etc.)
+    sell_status: Optional[str] = None  # Status of sell order (filled, cancelled, etc.)
 
 
 class PerformanceMetrics(BaseModel):
@@ -296,7 +298,9 @@ async def get_analysis(
                     profit_loss=round(pnl, 4),
                     cumulative_profit=round(cumulative_profit, 4),
                     cumulative_equity=round(equity, 4),
-                    is_auto_squared_off=False
+                    is_auto_squared_off=False,
+                    buy_status=buy_trade.status.value if buy_trade.status else None,
+                    sell_status=trade.status.value if trade.status else None
                 ))
 
                 # Update curves
@@ -349,7 +353,9 @@ async def get_analysis(
             profit_loss=round(pnl, 4),
             cumulative_profit=round(cumulative_profit, 4),
             cumulative_equity=round(equity, 4),
-            is_auto_squared_off=True
+            is_auto_squared_off=True,
+            buy_status=buy_trade.status.value if buy_trade.status else None,
+            sell_status="auto_squared"  # No actual sell, auto squared off
         ))
 
         # Update curves

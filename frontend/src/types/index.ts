@@ -109,6 +109,8 @@ export interface TradeAnalysisRow {
   cumulative_profit: number;
   cumulative_equity: number;
   is_auto_squared_off: boolean;
+  buy_status: string | null;
+  sell_status: string | null;
 }
 
 export interface PerformanceMetrics {

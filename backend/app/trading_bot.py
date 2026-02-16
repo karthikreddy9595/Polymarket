@@ -624,55 +624,149 @@ class TradingBot:
                 # Extra fallback if we run out of orderbook prices
                 buy_price = min(round(buy_prices[-1] + 0.02, 2), 0.99)
 
-            logger.info(f"[{self._timestamp()}] [LIVE] BUY attempt {attempt}/{MAX_BUY_RETRIES}: {self.settings.order_size} @ {buy_price} (ask price)")
+            # On final retry, use FOK (Fill-Or-Kill) market order to ensure fill
+            is_final_attempt = (attempt == MAX_BUY_RETRIES)
 
-            buy_order_id = await self._place_order(
-                market=market,
-                token_id=token_id,
-                side="buy",
-                price=buy_price,
-                size=self.settings.order_size,
-                outcome=side
-            )
+            logger.info(f"[{self._timestamp()}] ========== BUY ATTEMPT {attempt}/{MAX_BUY_RETRIES} ==========")
+
+            if is_final_attempt:
+                logger.info(f"[{self._timestamp()}] [RETRY] FINAL ATTEMPT - Switching to FOK MARKET ORDER")
+                logger.info(f"[{self._timestamp()}] [RETRY] FOK BUY: ${self.settings.order_size} worth @ market price (max 0.99)")
+                # For FOK market orders, use amount in dollars (price * size)
+                dollar_amount = 0.99 * self.settings.order_size
+                market_result = await self.client.place_market_order(
+                    token_id=token_id,
+                    side="buy",
+                    amount=dollar_amount
+                )
+                if market_result and market_result.get("orderID"):
+                    buy_order_id = market_result.get("orderID")
+                    final_buy_price = 0.99  # Market order price
+                    logger.info(f"[{self._timestamp()}] [RETRY] FOK ORDER PLACED: {buy_order_id[:20]}...")
+                else:
+                    buy_order_id = None
+                    logger.warning(f"[{self._timestamp()}] [RETRY] FOK ORDER FAILED - No orderID in response")
+                    logger.warning(f"[{self._timestamp()}] [RETRY] Response: {market_result}")
+            else:
+                logger.info(f"[{self._timestamp()}] [RETRY] LIMIT ORDER: {self.settings.order_size} shares @ {buy_price} (ask price)")
+                buy_order_id = await self._place_order(
+                    market=market,
+                    token_id=token_id,
+                    side="buy",
+                    price=buy_price,
+                    size=self.settings.order_size,
+                    outcome=side
+                )
+                # Set final price for limit orders (FOK price is set in the if block above)
+                if buy_order_id:
+                    final_buy_price = buy_price
+                    logger.info(f"[{self._timestamp()}] [RETRY] LIMIT ORDER PLACED: {buy_order_id[:20]}...")
 
             if not buy_order_id:
-                logger.warning(f"[{self._timestamp()}] [LIVE] Buy order placement failed (attempt {attempt})")
+                logger.warning(f"[{self._timestamp()}] [RETRY] ORDER PLACEMENT FAILED (attempt {attempt})")
                 if attempt < MAX_BUY_RETRIES:
+                    logger.info(f"[{self._timestamp()}] [RETRY] Waiting 0.5s before next attempt...")
                     await asyncio.sleep(0.5)
                     # Refresh orderbook for next attempt
                     fresh_asks = await self.client.get_top_asks(token_id, count=5)
                     if fresh_asks:
                         buy_prices = fresh_asks
-                        logger.info(f"[{self._timestamp()}] [LIVE] Refreshed orderbook asks: {fresh_asks}")
+                        logger.info(f"[{self._timestamp()}] [RETRY] Refreshed orderbook asks: {fresh_asks}")
                 continue
 
-            final_buy_price = buy_price
-
-            # Wait briefly then check if order is still active (not filled)
+            # Wait briefly then check order status using get_order API
+            logger.info(f"[{self._timestamp()}] [RETRY] Waiting {FILL_CHECK_DELAY}s to check fill status...")
             await asyncio.sleep(FILL_CHECK_DELAY)
 
-            # Check if order is still active using get_orders API
-            is_still_active = await self.client.is_order_active(buy_order_id)
+            # Check order status using get_order API (more reliable than is_order_active)
+            logger.info(f"[{self._timestamp()}] [RETRY] Checking order status via get_order API...")
+            order_status = await self.client.check_order_status(buy_order_id)
 
-            if not is_still_active:
-                # Order is not in active orders - it's filled!
-                logger.info(f"[{self._timestamp()}] [LIVE] Buy order FILLED (not in active orders)")
+            # Log status to dashboard
+            status_str = order_status.get("status", "UNKNOWN")
+            size_matched = order_status.get("size_matched", 0)
+            original_size = order_status.get("original_size", 0)
+            fill_pct = order_status.get("fill_percent", 0)
+
+            logger.info(f"[{self._timestamp()}] ╔══════════════════════════════════════════════════════════")
+            logger.info(f"[{self._timestamp()}] ║ ORDER STATUS: {status_str}")
+            logger.info(f"[{self._timestamp()}] ║ Filled: {size_matched}/{original_size} ({fill_pct:.1f}%)")
+            logger.info(f"[{self._timestamp()}] ║ Is Filled: {order_status.get('is_filled')} | Is Active: {order_status.get('is_active')}")
+            logger.info(f"[{self._timestamp()}] ╚══════════════════════════════════════════════════════════")
+
+            # Update trade record with status
+            await self._update_trade_status(buy_order_id, OrderStatus.FILLED if order_status.get("is_filled") else OrderStatus.OPEN)
+
+            # Check if order is fully filled
+            if order_status.get("is_filled"):
+                logger.info(f"[{self._timestamp()}] [RETRY] ORDER FILLED! Status: {status_str}")
+                # Update filled size
+                if size_matched > 0:
+                    self._live_state.filled_size = size_matched
                 break
 
-            # Double-check via balance
+            # Check if order status is MATCHED (filled)
+            if status_str in ["MATCHED", "FILLED"]:
+                logger.info(f"[{self._timestamp()}] [RETRY] ORDER MATCHED/FILLED! Status: {status_str}")
+                if size_matched > 0:
+                    self._live_state.filled_size = size_matched
+                break
+
+            # Double-check via balance (backup verification)
             actual_balance = await self.client.get_token_balance(token_id)
+            logger.info(f"[{self._timestamp()}] [RETRY] Token balance check: {actual_balance}")
             if actual_balance and actual_balance >= self.settings.order_size * 0.9:
-                logger.info(f"[{self._timestamp()}] [LIVE] Buy confirmed via balance check (balance: {actual_balance})")
+                logger.info(f"[{self._timestamp()}] [RETRY] ORDER FILLED! (confirmed via balance: {actual_balance})")
+                self._live_state.filled_size = actual_balance
                 break
 
-            # Order still active and we don't have tokens - cancel and retry with next ask price
-            logger.warning(f"[{self._timestamp()}] [LIVE] Order still active (unfilled), cancelling and retrying with next ask price")
+            # Order still active/open - need to cancel and retry
+            if order_status.get("is_active") or status_str in ["LIVE", "OPEN", "PENDING"]:
+                logger.warning(f"[{self._timestamp()}] [RETRY] ORDER NOT FILLED - Status: {status_str}, cancelling...")
 
-            try:
-                await self.client.cancel_order(buy_order_id)
-                logger.info(f"[{self._timestamp()}] [LIVE] Cancelled unfilled buy order {buy_order_id[:20]}...")
-            except Exception as e:
-                logger.warning(f"[{self._timestamp()}] [LIVE] Failed to cancel order: {e}")
+                # Cancel the unfilled order
+                cancel_success = False
+                try:
+                    logger.info(f"[{self._timestamp()}] [CANCEL] Cancelling order {buy_order_id[:20]}...")
+                    cancel_result = await self.client.cancel_order(buy_order_id)
+                    if cancel_result:
+                        logger.info(f"[{self._timestamp()}] [CANCEL] Cancel API returned success")
+                        cancel_success = True
+                    else:
+                        logger.warning(f"[{self._timestamp()}] [CANCEL] Cancel API returned False")
+                except Exception as e:
+                    logger.warning(f"[{self._timestamp()}] [CANCEL] Cancel exception: {e}")
+
+                # If single cancel failed, try cancel_all as fallback
+                if not cancel_success:
+                    try:
+                        logger.info(f"[{self._timestamp()}] [CANCEL] Trying cancel_all as fallback...")
+                        await self.client.cancel_all_orders()
+                        logger.info(f"[{self._timestamp()}] [CANCEL] cancel_all completed")
+                        cancel_success = True
+                    except Exception as e:
+                        logger.warning(f"[{self._timestamp()}] [CANCEL] cancel_all also failed: {e}")
+
+                # Wait and verify cancellation via get_order API
+                logger.info(f"[{self._timestamp()}] [CANCEL] Waiting 0.5s to verify cancellation...")
+                await asyncio.sleep(0.5)
+
+                # Verify cancellation using get_order API
+                verify_status = await self.client.check_order_status(buy_order_id)
+                verify_status_str = verify_status.get("status", "UNKNOWN")
+                logger.info(f"[{self._timestamp()}] [CANCEL] Post-cancel status: {verify_status_str}")
+
+                if verify_status.get("is_active"):
+                    logger.warning(f"[{self._timestamp()}] [CANCEL] WARNING: Order STILL ACTIVE after cancellation!")
+                else:
+                    logger.info(f"[{self._timestamp()}] [CANCEL] Order confirmed cancelled/inactive (Status: {verify_status_str})")
+
+                # Update trade record
+                await self._update_trade_status(buy_order_id, OrderStatus.CANCELLED)
+
+            # Reset order ID for next attempt
+            buy_order_id = None
+            logger.info(f"[{self._timestamp()}] [RETRY] Ready for next attempt...")
 
             if attempt < MAX_BUY_RETRIES:
                 # Refresh orderbook for next attempt to get latest ask prices
@@ -889,62 +983,149 @@ class TradingBot:
                 # Extra fallback if we run out of orderbook prices
                 sell_price = max(round(sell_prices[-1] - 0.02, 2), 0.01)
 
-            logger.info(f"[{self._timestamp()}] [LIVE] Market SELL attempt {attempt}/{MAX_SELL_RETRIES}: {sell_size} @ {sell_price} (bid price)")
+            # On final retry, use FOK (Fill-Or-Kill) market order to ensure fill
+            is_final_attempt = (attempt == MAX_SELL_RETRIES)
 
-            sell_order_id = await self._place_order(
-                market=market,
-                token_id=self._live_state.entry_token_id,
-                side="sell",
-                price=sell_price,
-                size=sell_size,
-                outcome=self._live_state.entry_side
-            )
+            logger.info(f"[{self._timestamp()}] ========== SELL ATTEMPT {attempt}/{MAX_SELL_RETRIES} ==========")
+
+            if is_final_attempt:
+                logger.info(f"[{self._timestamp()}] [RETRY] FINAL ATTEMPT - Switching to FOK MARKET ORDER")
+                logger.info(f"[{self._timestamp()}] [RETRY] FOK SELL: {sell_size} shares @ market price (min 0.01)")
+                # For FOK sell orders, amount is the number of shares to sell
+                market_result = await self.client.place_market_order(
+                    token_id=self._live_state.entry_token_id,
+                    side="sell",
+                    amount=sell_size
+                )
+                if market_result and market_result.get("orderID"):
+                    sell_order_id = market_result.get("orderID")
+                    final_sell_price = 0.01  # Market order price (actual price may differ)
+                    logger.info(f"[{self._timestamp()}] [RETRY] FOK SELL ORDER PLACED: {sell_order_id[:20]}...")
+                else:
+                    sell_order_id = None
+                    logger.warning(f"[{self._timestamp()}] [RETRY] FOK SELL ORDER FAILED - No orderID in response")
+                    logger.warning(f"[{self._timestamp()}] [RETRY] Response: {market_result}")
+            else:
+                logger.info(f"[{self._timestamp()}] [RETRY] LIMIT ORDER: {sell_size} shares @ {sell_price} (bid price)")
+                sell_order_id = await self._place_order(
+                    market=market,
+                    token_id=self._live_state.entry_token_id,
+                    side="sell",
+                    price=sell_price,
+                    size=sell_size,
+                    outcome=self._live_state.entry_side
+                )
+                # Set final price for limit orders (FOK price is set in the if block above)
+                if sell_order_id:
+                    final_sell_price = sell_price
+                    logger.info(f"[{self._timestamp()}] [RETRY] LIMIT ORDER PLACED: {sell_order_id[:20]}...")
 
             if not sell_order_id:
-                logger.warning(f"[{self._timestamp()}] [LIVE] Sell order placement failed (attempt {attempt})")
+                logger.warning(f"[{self._timestamp()}] [RETRY] SELL ORDER PLACEMENT FAILED (attempt {attempt})")
                 if attempt < MAX_SELL_RETRIES:
+                    logger.info(f"[{self._timestamp()}] [RETRY] Waiting 0.5s before next attempt...")
                     await asyncio.sleep(0.5)
                     # Refresh orderbook for next attempt
                     fresh_bids = await self.client.get_top_bids(self._live_state.entry_token_id, count=5)
                     if fresh_bids:
                         sell_prices = fresh_bids
-                        logger.info(f"[{self._timestamp()}] [LIVE] Refreshed orderbook bids: {fresh_bids}")
+                        logger.info(f"[{self._timestamp()}] [RETRY] Refreshed orderbook bids: {fresh_bids}")
                 continue
 
-            final_sell_price = sell_price
-
-            # Wait briefly then check if order is still active (not filled)
+            # Wait briefly then check order status using get_order API
+            logger.info(f"[{self._timestamp()}] [RETRY] Waiting {FILL_CHECK_DELAY}s to check fill status...")
             await asyncio.sleep(FILL_CHECK_DELAY)
 
-            # Check if order is still active using get_orders API
-            is_still_active = await self.client.is_order_active(sell_order_id)
+            # Check order status using get_order API (more reliable)
+            logger.info(f"[{self._timestamp()}] [RETRY] Checking order status via get_order API...")
+            order_status = await self.client.check_order_status(sell_order_id)
 
-            if not is_still_active:
-                # Order is not in active orders - it's filled!
-                logger.info(f"[{self._timestamp()}] [LIVE] Sell order FILLED (not in active orders)")
+            # Log status to dashboard
+            status_str = order_status.get("status", "UNKNOWN")
+            size_matched = order_status.get("size_matched", 0)
+            original_size = order_status.get("original_size", 0)
+            fill_pct = order_status.get("fill_percent", 0)
+
+            logger.info(f"[{self._timestamp()}] ╔══════════════════════════════════════════════════════════")
+            logger.info(f"[{self._timestamp()}] ║ SELL ORDER STATUS: {status_str}")
+            logger.info(f"[{self._timestamp()}] ║ Filled: {size_matched}/{original_size} ({fill_pct:.1f}%)")
+            logger.info(f"[{self._timestamp()}] ║ Is Filled: {order_status.get('is_filled')} | Is Active: {order_status.get('is_active')}")
+            logger.info(f"[{self._timestamp()}] ╚══════════════════════════════════════════════════════════")
+
+            # Update trade record with status
+            await self._update_trade_status(sell_order_id, OrderStatus.FILLED if order_status.get("is_filled") else OrderStatus.OPEN)
+
+            # Check if order is fully filled
+            if order_status.get("is_filled"):
+                logger.info(f"[{self._timestamp()}] [RETRY] SELL ORDER FILLED! Status: {status_str}")
                 break
 
-            # Order still active - check token balance to confirm
+            # Check if order status is MATCHED (filled)
+            if status_str in ["MATCHED", "FILLED"]:
+                logger.info(f"[{self._timestamp()}] [RETRY] SELL ORDER MATCHED/FILLED! Status: {status_str}")
+                break
+
+            # Double-check via balance (backup verification)
             remaining_balance = await self.client.get_conditional_balance(self._live_state.entry_token_id)
+            logger.info(f"[{self._timestamp()}] [RETRY] Token balance check: {remaining_balance}")
             if remaining_balance is None or remaining_balance < 0.1:
-                logger.info(f"[{self._timestamp()}] [LIVE] Sell confirmed via balance check (balance: {remaining_balance})")
+                logger.info(f"[{self._timestamp()}] [RETRY] SELL ORDER FILLED! (confirmed via balance: {remaining_balance})")
                 break
 
-            # Order still active and we still have tokens - cancel and retry with next bid price
-            logger.warning(f"[{self._timestamp()}] [LIVE] Order still active (unfilled), cancelling and retrying with next bid price")
+            # Order still active/open - need to cancel and retry
+            if order_status.get("is_active") or status_str in ["LIVE", "OPEN", "PENDING"]:
+                logger.warning(f"[{self._timestamp()}] [RETRY] ORDER NOT FILLED - Status: {status_str}, cancelling...")
 
-            try:
-                await self.client.cancel_order(sell_order_id)
-                logger.info(f"[{self._timestamp()}] [LIVE] Cancelled unfilled sell order {sell_order_id[:20]}...")
-            except Exception as e:
-                logger.warning(f"[{self._timestamp()}] [LIVE] Failed to cancel order: {e}")
+                # Cancel the unfilled order
+                cancel_success = False
+                try:
+                    logger.info(f"[{self._timestamp()}] [CANCEL] Cancelling order {sell_order_id[:20]}...")
+                    cancel_result = await self.client.cancel_order(sell_order_id)
+                    if cancel_result:
+                        logger.info(f"[{self._timestamp()}] [CANCEL] Cancel API returned success")
+                        cancel_success = True
+                    else:
+                        logger.warning(f"[{self._timestamp()}] [CANCEL] Cancel API returned False")
+                except Exception as e:
+                    logger.warning(f"[{self._timestamp()}] [CANCEL] Cancel exception: {e}")
+
+                # If single cancel failed, try cancel_all as fallback
+                if not cancel_success:
+                    try:
+                        logger.info(f"[{self._timestamp()}] [CANCEL] Trying cancel_all as fallback...")
+                        await self.client.cancel_all_orders()
+                        logger.info(f"[{self._timestamp()}] [CANCEL] cancel_all completed")
+                        cancel_success = True
+                    except Exception as e:
+                        logger.warning(f"[{self._timestamp()}] [CANCEL] cancel_all also failed: {e}")
+
+                # Wait and verify cancellation via get_order API
+                logger.info(f"[{self._timestamp()}] [CANCEL] Waiting 0.5s to verify cancellation...")
+                await asyncio.sleep(0.5)
+
+                # Verify cancellation using get_order API
+                verify_status = await self.client.check_order_status(sell_order_id)
+                verify_status_str = verify_status.get("status", "UNKNOWN")
+                logger.info(f"[{self._timestamp()}] [CANCEL] Post-cancel status: {verify_status_str}")
+
+                if verify_status.get("is_active"):
+                    logger.warning(f"[{self._timestamp()}] [CANCEL] WARNING: Order STILL ACTIVE after cancellation!")
+                else:
+                    logger.info(f"[{self._timestamp()}] [CANCEL] Order confirmed cancelled/inactive (Status: {verify_status_str})")
+
+                # Update trade record
+                await self._update_trade_status(sell_order_id, OrderStatus.CANCELLED)
+
+            # Reset order ID for next attempt
+            sell_order_id = None
+            logger.info(f"[{self._timestamp()}] [RETRY] Ready for next attempt...")
 
             if attempt < MAX_SELL_RETRIES:
                 # Refresh orderbook for next attempt to get latest bid prices
                 fresh_bids = await self.client.get_top_bids(self._live_state.entry_token_id, count=5)
                 if fresh_bids:
                     sell_prices = fresh_bids
-                    logger.info(f"[{self._timestamp()}] [LIVE] Refreshed orderbook bids: {fresh_bids}")
+                    logger.info(f"[{self._timestamp()}] [RETRY] Refreshed orderbook bids: {fresh_bids}")
                 await asyncio.sleep(0.5)
 
         if sell_order_id:

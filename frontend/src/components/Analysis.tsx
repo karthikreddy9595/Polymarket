@@ -652,7 +652,9 @@ function Analysis({ onBack }: AnalysisProps) {
                     </span>
                   </th>
                   <th className="text-right py-3 px-4">Buy Price</th>
+                  <th className="text-center py-3 px-4">Buy Status</th>
                   <th className="text-right py-3 px-4">Sell Price</th>
+                  <th className="text-center py-3 px-4">Sell Status</th>
                   <th
                     className="text-right py-3 px-4 cursor-pointer hover:text-white select-none"
                     onClick={() => handleSort('profit_loss')}
@@ -677,7 +679,7 @@ function Analysis({ onBack }: AnalysisProps) {
               <tbody>
                 {sortedAndFilteredTrades.length === 0 ? (
                   <tr>
-                    <td colSpan={9} className="text-center py-8 text-gray-500">
+                    <td colSpan={11} className="text-center py-8 text-gray-500">
                       {trades.length === 0 ? 'No trades yet' : 'No trades match filters'}
                     </td>
                   </tr>
@@ -713,11 +715,30 @@ function Analysis({ onBack }: AnalysisProps) {
                       <td className="py-3 px-4 text-right text-gray-300">
                         {trade.buy_price?.toFixed(4) || '-'}
                       </td>
+                      <td className="py-3 px-4 text-center">
+                        <span className={`text-xs px-2 py-1 rounded ${
+                          trade.buy_status === 'filled' ? 'bg-green-900 text-green-300' :
+                          trade.buy_status === 'cancelled' || trade.buy_status === 'failed' ? 'bg-red-900 text-red-300' :
+                          'bg-yellow-900 text-yellow-300'
+                        }`}>
+                          {trade.buy_status || '-'}
+                        </span>
+                      </td>
                       <td className="py-3 px-4 text-right text-gray-300">
                         {trade.sell_price?.toFixed(4) || '-'}
                         {trade.is_auto_squared_off && (
                           <span className="text-xs text-yellow-400 ml-1">(0.995)</span>
                         )}
+                      </td>
+                      <td className="py-3 px-4 text-center">
+                        <span className={`text-xs px-2 py-1 rounded ${
+                          trade.sell_status === 'filled' ? 'bg-green-900 text-green-300' :
+                          trade.sell_status === 'cancelled' || trade.sell_status === 'failed' ? 'bg-red-900 text-red-300' :
+                          trade.sell_status === 'auto_squared' ? 'bg-yellow-900 text-yellow-300' :
+                          'bg-yellow-900 text-yellow-300'
+                        }`}>
+                          {trade.sell_status || '-'}
+                        </span>
                       </td>
                       <td className={`py-3 px-4 text-right font-medium ${
                         (trade.profit_loss ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'
