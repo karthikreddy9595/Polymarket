@@ -1,6 +1,6 @@
 """Trade analysis endpoints with quant metrics."""
 
-from typing import List, Optional
+from typing import List, Optional, Dict
 from datetime import datetime, timedelta
 import math
 import csv
@@ -138,12 +138,45 @@ async def get_analysis(
     # Use PAPER_BALANCE from settings as starting equity
     starting_equity = settings.paper_balance
 
-    # Use live balance from Polymarket when in live trading mode
+    # Fetch live data from Polymarket API when in live trading mode
+    api_trades_by_order: Dict[str, Dict] = {}  # order_id -> trade data with price
+    api_positions_by_token: Dict[str, Dict] = {}  # token_id -> position data
+
     if not settings.paper_trading:
         client = await get_polymarket_client()
         if client.is_connected:
             live_balance = await client.get_balance()
             current_equity = live_balance if live_balance is not None else starting_equity
+
+            # Fetch trades from API to get actual fill prices
+            try:
+                api_trades = await client.get_trades()
+                for t in api_trades:
+                    order_id = t.get("order_id") or t.get("orderId") or t.get("id")
+                    if order_id:
+                        api_trades_by_order[order_id] = {
+                            "price": float(t.get("price") or t.get("avg_price") or 0),
+                            "size": float(t.get("size") or t.get("amount") or 0),
+                            "side": t.get("side", "").lower(),
+                        }
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).warning(f"Failed to fetch API trades: {e}")
+
+            # Fetch positions from API to get cost basis (buy price)
+            try:
+                if settings.funder_address:
+                    api_positions = await client.get_positions_api(settings.funder_address)
+                    for p in api_positions:
+                        token_id = p.get("asset") or p.get("token_id") or p.get("tokenId")
+                        if token_id:
+                            api_positions_by_token[token_id] = {
+                                "avg_price": float(p.get("avgPrice") or p.get("averagePrice") or p.get("costBasis") or 0),
+                                "size": float(p.get("size") or p.get("quantity") or 0),
+                            }
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).warning(f"Failed to fetch API positions: {e}")
         else:
             current_equity = starting_equity
     else:
@@ -213,14 +246,32 @@ async def get_analysis(
                 buy_trade, outcome, market_name = open_positions[token_id]
                 del open_positions[token_id]
 
-                # Calculate P&L
-                pnl = (trade.price - buy_trade.price) * trade.size
+                # Get buy price: prefer API data (from positions), fallback to DB
+                buy_price = buy_trade.price
+                if buy_trade.order_id and buy_trade.order_id in api_trades_by_order:
+                    api_buy = api_trades_by_order[buy_trade.order_id]
+                    if api_buy.get("price", 0) > 0:
+                        buy_price = api_buy["price"]
+                elif token_id in api_positions_by_token:
+                    api_pos = api_positions_by_token[token_id]
+                    if api_pos.get("avg_price", 0) > 0:
+                        buy_price = api_pos["avg_price"]
+
+                # Get sell price: prefer API data (from trades), fallback to DB
+                sell_price = trade.price
+                if trade.order_id and trade.order_id in api_trades_by_order:
+                    api_sell = api_trades_by_order[trade.order_id]
+                    if api_sell.get("price", 0) > 0:
+                        sell_price = api_sell["price"]
+
+                # Calculate P&L using API-sourced prices
+                pnl = (sell_price - buy_price) * trade.size
                 cumulative_profit += pnl
                 equity += pnl
 
                 # Track returns for Sharpe calculation
-                if buy_trade.price > 0:
-                    trade_return = (trade.price - buy_trade.price) / buy_trade.price
+                if buy_price > 0:
+                    trade_return = (sell_price - buy_price) / buy_price
                     returns.append(trade_return)
 
                 # Track wins/losses
@@ -235,13 +286,13 @@ async def get_analysis(
                     if pnl < worst_trade:
                         worst_trade = pnl
 
-                # Add to trade rows
+                # Add to trade rows with API-sourced prices
                 trade_rows.append(TradeAnalysisRow(
                     timestamp=trade.created_at.strftime("%Y-%m-%d %H:%M:%S"),
                     market_name=market_name,
                     security=outcome,
-                    buy_price=buy_trade.price,
-                    sell_price=trade.price,
+                    buy_price=buy_price,
+                    sell_price=sell_price,
                     profit_loss=round(pnl, 4),
                     cumulative_profit=round(cumulative_profit, 4),
                     cumulative_equity=round(equity, 4),
@@ -254,15 +305,26 @@ async def get_analysis(
 
     # Handle auto square off for remaining open positions (buys without matching sells)
     for token_id, (buy_trade, outcome, market_name) in open_positions.items():
+        # Get buy price: prefer API data, fallback to DB
+        buy_price = buy_trade.price
+        if buy_trade.order_id and buy_trade.order_id in api_trades_by_order:
+            api_buy = api_trades_by_order[buy_trade.order_id]
+            if api_buy.get("price", 0) > 0:
+                buy_price = api_buy["price"]
+        elif token_id in api_positions_by_token:
+            api_pos = api_positions_by_token[token_id]
+            if api_pos.get("avg_price", 0) > 0:
+                buy_price = api_pos["avg_price"]
+
         # Auto square off at 0.995 per quantity
         sell_price = AUTO_SQUARE_OFF_PRICE
-        pnl = (sell_price - buy_trade.price) * buy_trade.size
+        pnl = (sell_price - buy_price) * buy_trade.size
         cumulative_profit += pnl
         equity += pnl
 
         # Track returns for Sharpe calculation
-        if buy_trade.price > 0:
-            trade_return = (sell_price - buy_trade.price) / buy_trade.price
+        if buy_price > 0:
+            trade_return = (sell_price - buy_price) / buy_price
             returns.append(trade_return)
 
         # Track wins/losses
@@ -277,12 +339,12 @@ async def get_analysis(
             if pnl < worst_trade:
                 worst_trade = pnl
 
-        # Add auto squared off trade to rows
+        # Add auto squared off trade to rows with API-sourced buy price
         trade_rows.append(TradeAnalysisRow(
             timestamp=buy_trade.created_at.strftime("%Y-%m-%d %H:%M:%S"),
             market_name=market_name,
             security=outcome,
-            buy_price=buy_trade.price,
+            buy_price=buy_price,
             sell_price=sell_price,
             profit_loss=round(pnl, 4),
             cumulative_profit=round(cumulative_profit, 4),
@@ -398,6 +460,8 @@ async def export_trades(
 ):
     """Export trade data to CSV/Excel."""
     settings = get_settings()
+    import logging
+    _logger = logging.getLogger(__name__)
 
     # Get bot state for starting balance
     result = await db.execute(select(BotState).limit(1))
@@ -405,6 +469,39 @@ async def export_trades(
 
     # Use PAPER_BALANCE from settings as starting equity
     starting_equity = settings.paper_balance
+
+    # Fetch live data from Polymarket API when in live trading mode
+    api_trades_by_order: Dict[str, Dict] = {}
+    api_positions_by_token: Dict[str, Dict] = {}
+
+    if not settings.paper_trading:
+        client = await get_polymarket_client()
+        if client.is_connected:
+            # Fetch trades from API
+            try:
+                api_trades = await client.get_trades()
+                for t in api_trades:
+                    order_id = t.get("order_id") or t.get("orderId") or t.get("id")
+                    if order_id:
+                        api_trades_by_order[order_id] = {
+                            "price": float(t.get("price") or t.get("avg_price") or 0),
+                            "size": float(t.get("size") or t.get("amount") or 0),
+                        }
+            except Exception as e:
+                _logger.warning(f"Failed to fetch API trades for export: {e}")
+
+            # Fetch positions from API
+            try:
+                if settings.funder_address:
+                    api_positions = await client.get_positions_api(settings.funder_address)
+                    for p in api_positions:
+                        token_id = p.get("asset") or p.get("token_id") or p.get("tokenId")
+                        if token_id:
+                            api_positions_by_token[token_id] = {
+                                "avg_price": float(p.get("avgPrice") or p.get("averagePrice") or p.get("costBasis") or 0),
+                            }
+            except Exception as e:
+                _logger.warning(f"Failed to fetch API positions for export: {e}")
 
     # Build query with filters
     query = select(Trade).where(Trade.status == OrderStatus.FILLED)
@@ -453,7 +550,25 @@ async def export_trades(
                 buy_trade, outcome, market_name = open_positions[token_id]
                 del open_positions[token_id]
 
-                pnl = (trade.price - buy_trade.price) * trade.size
+                # Get buy price: prefer API data, fallback to DB
+                buy_price = buy_trade.price
+                if buy_trade.order_id and buy_trade.order_id in api_trades_by_order:
+                    api_buy = api_trades_by_order[buy_trade.order_id]
+                    if api_buy.get("price", 0) > 0:
+                        buy_price = api_buy["price"]
+                elif token_id in api_positions_by_token:
+                    api_pos = api_positions_by_token[token_id]
+                    if api_pos.get("avg_price", 0) > 0:
+                        buy_price = api_pos["avg_price"]
+
+                # Get sell price: prefer API data, fallback to DB
+                sell_price = trade.price
+                if trade.order_id and trade.order_id in api_trades_by_order:
+                    api_sell = api_trades_by_order[trade.order_id]
+                    if api_sell.get("price", 0) > 0:
+                        sell_price = api_sell["price"]
+
+                pnl = (sell_price - buy_price) * trade.size
                 cumulative_profit += pnl
                 equity += pnl
 
@@ -461,8 +576,8 @@ async def export_trades(
                     "Timestamp": trade.created_at.strftime("%Y-%m-%d %H:%M:%S"),
                     "Market": market_name or "Unknown",
                     "Security": outcome,
-                    "Buy Price": round(buy_trade.price, 4),
-                    "Sell Price": round(trade.price, 4),
+                    "Buy Price": round(buy_price, 4),
+                    "Sell Price": round(sell_price, 4),
                     "Size": round(trade.size, 4),
                     "P&L": round(pnl, 4),
                     "Cumulative P&L": round(cumulative_profit, 4),
@@ -473,8 +588,19 @@ async def export_trades(
 
     # Handle auto square off for remaining open positions
     for token_id, (buy_trade, outcome, market_name) in open_positions.items():
+        # Get buy price: prefer API data, fallback to DB
+        buy_price = buy_trade.price
+        if buy_trade.order_id and buy_trade.order_id in api_trades_by_order:
+            api_buy = api_trades_by_order[buy_trade.order_id]
+            if api_buy.get("price", 0) > 0:
+                buy_price = api_buy["price"]
+        elif token_id in api_positions_by_token:
+            api_pos = api_positions_by_token[token_id]
+            if api_pos.get("avg_price", 0) > 0:
+                buy_price = api_pos["avg_price"]
+
         sell_price = AUTO_SQUARE_OFF_PRICE
-        pnl = (sell_price - buy_trade.price) * buy_trade.size
+        pnl = (sell_price - buy_price) * buy_trade.size
         cumulative_profit += pnl
         equity += pnl
 
@@ -482,7 +608,7 @@ async def export_trades(
             "Timestamp": buy_trade.created_at.strftime("%Y-%m-%d %H:%M:%S"),
             "Market": market_name or "Unknown",
             "Security": outcome,
-            "Buy Price": round(buy_trade.price, 4),
+            "Buy Price": round(buy_price, 4),
             "Sell Price": round(sell_price, 4),
             "Size": round(buy_trade.size, 4),
             "P&L": round(pnl, 4),

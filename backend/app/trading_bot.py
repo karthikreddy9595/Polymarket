@@ -416,7 +416,7 @@ class TradingBot:
         STOPLOSS = self.settings.stoploss
         TARGET = self.settings.target
         ORDER_CANCEL_THRESHOLD = self.settings.order_cancel_threshold
-        NO_BUY_THRESHOLD = 10 / 60  # 10 seconds in minutes = 0.1667 - no buying below this
+        NO_BUY_THRESHOLD = 0 / 60  # 10 seconds in minutes = 0.1667 - no buying below this
         FORCE_CLOSE_THRESHOLD = 3 / 60  # 5 seconds in minutes - force sell all positions
         EARLY_BUY_THRESHOLD = 3.5  # 3 minutes - don't buy in first 2 minutes of trading window
         max_positions = self.settings.max_positions_per_market
@@ -1518,46 +1518,76 @@ class TradingBot:
             )
             return order_id
 
-        # Live trading - place REAL order on Polymarket
+        # Live trading - place REAL order on Polymarket with retry logic
         market_options = await self.client.get_market_options(market_id)
         tick_size = market_options.get("tick_size", "0.01")
         neg_risk = market_options.get("neg_risk", False)
 
-        result = await self.client.place_limit_order(
-            token_id=token_id,
-            side=side,
-            price=price,
-            size=size,
-            tick_size=tick_size,
-            neg_risk=neg_risk
-        )
+        MAX_RETRIES = 3
+        RETRY_DELAY = 1.0  # seconds between retries
 
-        if result:
-            order_id = result.get("orderID") or result.get("id")
-            logger.info(f"[{self._timestamp()}] [LIVE] ORDER: {side.upper()} {outcome} {size} @ {price}")
+        for attempt in range(1, MAX_RETRIES + 1):
+            logger.info(f"[{self._timestamp()}] [LIVE] Placing order attempt {attempt}/{MAX_RETRIES}: {side.upper()} {outcome} {size} @ {price}")
 
-            await self._record_trade(
-                order_id=order_id,
-                market_id=market_id,
+            result = await self.client.place_limit_order(
                 token_id=token_id,
                 side=side,
                 price=price,
                 size=size,
-                is_paper=False,
-                market_name=market_name
+                tick_size=tick_size,
+                neg_risk=neg_risk
             )
 
-            self._active_orders[order_key] = {
-                "order_id": order_id,
-                "status": "open",
-                "price": price,
-                "size": size
-            }
+            if not result:
+                logger.warning(f"[{self._timestamp()}] [LIVE] Order placement returned no result (attempt {attempt}/{MAX_RETRIES})")
+                if attempt < MAX_RETRIES:
+                    await asyncio.sleep(RETRY_DELAY)
+                continue
 
-            return order_id
-        else:
-            logger.error(f"[{self._timestamp()}] [LIVE] ORDER FAILED")
-            return None
+            order_id = result.get("orderID") or result.get("id")
+            if not order_id:
+                logger.warning(f"[{self._timestamp()}] [LIVE] Order result has no order ID (attempt {attempt}/{MAX_RETRIES})")
+                if attempt < MAX_RETRIES:
+                    await asyncio.sleep(RETRY_DELAY)
+                continue
+
+            # Verify order was actually placed by checking with get_order API
+            await asyncio.sleep(0.5)  # Brief delay before verification
+            order_check = await self.client.get_order(order_id)
+
+            if order_check:
+                order_status = order_check.get("status", "").upper()
+                logger.info(f"[{self._timestamp()}] [LIVE] Order verified: {order_id[:20]}... status={order_status}")
+
+                # Order is confirmed - record and return
+                logger.info(f"[{self._timestamp()}] [LIVE] ORDER PLACED: {side.upper()} {outcome} {size} @ {price}")
+
+                await self._record_trade(
+                    order_id=order_id,
+                    market_id=market_id,
+                    token_id=token_id,
+                    side=side,
+                    price=price,
+                    size=size,
+                    is_paper=False,
+                    market_name=market_name
+                )
+
+                self._active_orders[order_key] = {
+                    "order_id": order_id,
+                    "status": "open",
+                    "price": price,
+                    "size": size
+                }
+
+                return order_id
+            else:
+                logger.warning(f"[{self._timestamp()}] [LIVE] Order verification failed for {order_id[:20]}... (attempt {attempt}/{MAX_RETRIES})")
+                if attempt < MAX_RETRIES:
+                    await asyncio.sleep(RETRY_DELAY)
+
+        logger.error(f"[{self._timestamp()}] [LIVE] ORDER FAILED after {MAX_RETRIES} attempts")
+        return None
 
     def _calculate_taker_fee(self, trade_value: float) -> float:
         """
