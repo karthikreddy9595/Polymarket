@@ -715,7 +715,12 @@ class TradingBot:
             return
 
     async def _market_sell(self, market: Dict[str, Any], current_price: float, reason: str) -> None:
-        """Execute market sell order using actual token balance."""
+        """Execute market sell order using actual token balance.
+
+        Uses orderbook bid prices for retry attempts to ensure fill.
+        Fetches top 5 bid prices and uses them sequentially for retries.
+        Falls back to price reduction if orderbook unavailable.
+        """
         import math
 
         # Prevent repeated sell attempts (order might have gone through but returned error)
@@ -731,9 +736,6 @@ class TradingBot:
         # Mark that we're attempting a sell
         self._live_state.sell_attempted = True
 
-        # Price slightly below current to fill immediately
-        sell_price = max(round(current_price - 0.02, 2), 0.01)
-
         # Get actual conditional token balance (most accurate)
         actual_balance = await self.client.get_conditional_balance(self._live_state.entry_token_id)
 
@@ -741,19 +743,14 @@ class TradingBot:
         MIN_ORDER_SIZE = 0.1
 
         if actual_balance and actual_balance >= MIN_ORDER_SIZE:
-            # Use actual balance, FLOOR to avoid "not enough balance" errors
-            # round() can round UP (4.9656 -> 4.97), but we need to round DOWN (4.9656 -> 4.96)
             sell_size = math.floor(actual_balance * 100) / 100
             logger.info(f"[{self._timestamp()}] [LIVE] Actual token balance: {actual_balance}, selling: {sell_size}")
         elif actual_balance is not None and actual_balance < MIN_ORDER_SIZE:
-            # Balance too small to sell, close position without selling
             logger.info(f"[{self._timestamp()}] [LIVE] Balance {actual_balance} too small to sell (min: {MIN_ORDER_SIZE}), closing position")
             await self._close_live_position(f"{reason}_DUST")
             return
         else:
-            # Couldn't get balance, use filled_size
             sell_size = self._live_state.filled_size if self._live_state.filled_size > 0 else self.settings.order_size
-            # Also floor the fallback size
             sell_size = math.floor(sell_size * 100) / 100
             logger.info(f"[{self._timestamp()}] [LIVE] Using filled_size: {sell_size}")
 
@@ -762,20 +759,98 @@ class TradingBot:
             await self._close_live_position(f"{reason}_DUST")
             return
 
-        logger.info(f"[{self._timestamp()}] [LIVE] Market SELL {sell_size} @ {sell_price}")
+        # Retry settings for stoploss
+        MAX_SELL_RETRIES = 5
+        FALLBACK_PRICE_REDUCTION = 0.02  # Fallback if orderbook unavailable
+        FILL_CHECK_DELAY = 1.0  # Wait 1 second before checking if filled
 
-        sell_order_id = await self._place_order(
-            market=market,
-            token_id=self._live_state.entry_token_id,
-            side="sell",
-            price=sell_price,
-            size=sell_size,
-            outcome=self._live_state.entry_side
-        )
+        # Fetch top 5 bid prices from orderbook for smart pricing
+        top_bids = await self.client.get_top_bids(self._live_state.entry_token_id, count=5)
+
+        if top_bids:
+            logger.info(f"[{self._timestamp()}] [LIVE] Using orderbook bids for sell: {top_bids}")
+            # Use orderbook bid prices for retries
+            sell_prices = top_bids
+        else:
+            # Fallback: generate prices by reducing from current price
+            logger.warning(f"[{self._timestamp()}] [LIVE] Orderbook unavailable, using fallback price reduction")
+            sell_prices = [
+                max(round(current_price - (i * FALLBACK_PRICE_REDUCTION), 2), 0.01)
+                for i in range(1, MAX_SELL_RETRIES + 1)
+            ]
+
+        sell_order_id = None
+        final_sell_price = sell_prices[0] if sell_prices else max(round(current_price - 0.02, 2), 0.01)
+
+        for attempt in range(1, MAX_SELL_RETRIES + 1):
+            # Get sell price for this attempt (use orderbook bid or fallback)
+            if attempt <= len(sell_prices):
+                sell_price = sell_prices[attempt - 1]
+            else:
+                # Extra fallback if we run out of orderbook prices
+                sell_price = max(round(sell_prices[-1] - 0.02, 2), 0.01)
+
+            logger.info(f"[{self._timestamp()}] [LIVE] Market SELL attempt {attempt}/{MAX_SELL_RETRIES}: {sell_size} @ {sell_price} (bid price)")
+
+            sell_order_id = await self._place_order(
+                market=market,
+                token_id=self._live_state.entry_token_id,
+                side="sell",
+                price=sell_price,
+                size=sell_size,
+                outcome=self._live_state.entry_side
+            )
+
+            if not sell_order_id:
+                logger.warning(f"[{self._timestamp()}] [LIVE] Sell order placement failed (attempt {attempt})")
+                if attempt < MAX_SELL_RETRIES:
+                    await asyncio.sleep(0.5)
+                    # Refresh orderbook for next attempt
+                    fresh_bids = await self.client.get_top_bids(self._live_state.entry_token_id, count=5)
+                    if fresh_bids:
+                        sell_prices = fresh_bids
+                        logger.info(f"[{self._timestamp()}] [LIVE] Refreshed orderbook bids: {fresh_bids}")
+                continue
+
+            final_sell_price = sell_price
+
+            # Wait briefly then check if order is still active (not filled)
+            await asyncio.sleep(FILL_CHECK_DELAY)
+
+            # Check if order is still active using get_orders API
+            is_still_active = await self.client.is_order_active(sell_order_id)
+
+            if not is_still_active:
+                # Order is not in active orders - it's filled!
+                logger.info(f"[{self._timestamp()}] [LIVE] Sell order FILLED (not in active orders)")
+                break
+
+            # Order still active - check token balance to confirm
+            remaining_balance = await self.client.get_conditional_balance(self._live_state.entry_token_id)
+            if remaining_balance is None or remaining_balance < 0.1:
+                logger.info(f"[{self._timestamp()}] [LIVE] Sell confirmed via balance check (balance: {remaining_balance})")
+                break
+
+            # Order still active and we still have tokens - cancel and retry with next bid price
+            logger.warning(f"[{self._timestamp()}] [LIVE] Order still active (unfilled), cancelling and retrying with next bid price")
+
+            try:
+                await self.client.cancel_order(sell_order_id)
+                logger.info(f"[{self._timestamp()}] [LIVE] Cancelled unfilled sell order {sell_order_id[:20]}...")
+            except Exception as e:
+                logger.warning(f"[{self._timestamp()}] [LIVE] Failed to cancel order: {e}")
+
+            if attempt < MAX_SELL_RETRIES:
+                # Refresh orderbook for next attempt to get latest bid prices
+                fresh_bids = await self.client.get_top_bids(self._live_state.entry_token_id, count=5)
+                if fresh_bids:
+                    sell_prices = fresh_bids
+                    logger.info(f"[{self._timestamp()}] [LIVE] Refreshed orderbook bids: {fresh_bids}")
+                await asyncio.sleep(0.5)
 
         if sell_order_id:
-            pnl = (current_price - self._live_state.entry_price) * sell_size
-            logger.info(f"[{self._timestamp()}] [LIVE] {reason} - Sold {sell_size} @ {current_price:.4f} | P&L: ${pnl:+.2f}")
+            pnl = (final_sell_price - self._live_state.entry_price) * sell_size
+            logger.info(f"[{self._timestamp()}] [LIVE] {reason} - Sold {sell_size} @ {final_sell_price:.4f} | P&L: ${pnl:+.2f}")
 
             # Update trade status and position in database
             market_id = market.get("id") or market.get("conditionId")
@@ -784,14 +859,14 @@ class TradingBot:
                 market_id=market_id,
                 token_id=self._live_state.entry_token_id,
                 side="sell",
-                price=current_price,
+                price=final_sell_price,
                 size=sell_size,
                 outcome=self._live_state.entry_side
             )
 
             await self._close_live_position(reason)
         else:
-            logger.error(f"[{self._timestamp()}] [LIVE] Failed to sell!")
+            logger.error(f"[{self._timestamp()}] [LIVE] Failed to sell after {MAX_SELL_RETRIES} attempts!")
 
     async def _target_sell(self, market: Dict[str, Any], target_price: float, reason: str) -> None:
         """Execute limit sell order at exact target price."""

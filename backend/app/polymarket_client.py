@@ -278,6 +278,39 @@ class PolymarketClient:
             logger.error(f"Failed to get open orders: {e}")
             return []
 
+    async def is_order_active(self, order_id: str) -> bool:
+        """
+        Check if an order is still active (OPEN/LIVE, not filled).
+        Uses the get_orders API to check active orders.
+
+        Returns:
+            True if order is still active (unfilled), False if filled or not found
+        """
+        if not self.is_connected or not self.client:
+            return False
+
+        try:
+            # Get all active orders
+            active_orders = await self._run_sync(lambda: self.client.get_orders())
+            if not active_orders or not isinstance(active_orders, list):
+                return False
+
+            # Check if our order is in the active orders list
+            for order in active_orders:
+                active_order_id = order.get("id") or order.get("orderID") or order.get("order_id")
+                if active_order_id == order_id:
+                    status = order.get("status", "").upper()
+                    # Order is active if it's OPEN or LIVE (not filled)
+                    if status in ["OPEN", "LIVE", "PENDING"]:
+                        logger.info(f"[ORDER CHECK] Order {order_id[:20]}... is still active (status: {status})")
+                        return True
+
+            # Order not found in active orders - likely filled or cancelled
+            return False
+        except Exception as e:
+            logger.error(f"Failed to check if order is active: {e}")
+            return False
+
     async def get_trades(self) -> List[Dict[str, Any]]:
         """Get filled trade history."""
         if not self.is_connected or not self.client:
@@ -550,6 +583,54 @@ class PolymarketClient:
         except Exception as e:
             logger.error(f"Failed to get orderbook: {e}")
             return None
+
+    async def get_top_bids(self, token_id: str, count: int = 5) -> List[float]:
+        """
+        Get top N bid prices from orderbook (for selling).
+
+        When selling, we want to match against bids (what buyers are paying).
+        Returns prices sorted from highest to lowest (best bids first).
+
+        Args:
+            token_id: The token ID
+            count: Number of top bids to return (default 5)
+
+        Returns:
+            List of bid prices sorted highest to lowest, or empty list if failed
+        """
+        try:
+            orderbook = await self.get_orderbook(token_id)
+            if not orderbook:
+                logger.warning(f"[ORDERBOOK] Failed to get orderbook for {token_id[:20]}...")
+                return []
+
+            # Orderbook structure: {"bids": [{"price": "0.50", "size": "100"}, ...], "asks": [...]}
+            bids = orderbook.get("bids", [])
+
+            if not bids:
+                logger.warning(f"[ORDERBOOK] No bids found in orderbook")
+                return []
+
+            # Extract prices and sort descending (highest bid first)
+            bid_prices = []
+            for bid in bids:
+                try:
+                    price = float(bid.get("price", 0))
+                    if price > 0:
+                        bid_prices.append(price)
+                except (ValueError, TypeError):
+                    continue
+
+            # Sort descending and take top N
+            bid_prices.sort(reverse=True)
+            top_bids = bid_prices[:count]
+
+            logger.info(f"[ORDERBOOK] Top {len(top_bids)} bids: {top_bids}")
+            return top_bids
+
+        except Exception as e:
+            logger.error(f"[ORDERBOOK] Failed to get top bids: {e}")
+            return []
 
     async def get_current_price(self, token_id: str) -> Optional[float]:
         """
