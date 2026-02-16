@@ -384,7 +384,7 @@ class TradingBot:
         ORDER_CANCEL_THRESHOLD = self.settings.order_cancel_threshold
         NO_BUY_THRESHOLD = 10 / 60  # 10 seconds in minutes = 0.1667 - no buying below this
         FORCE_CLOSE_THRESHOLD = 3 / 60  # 5 seconds in minutes - force sell all positions
-        EARLY_BUY_THRESHOLD = 3.0  # 3 minutes - don't buy in first 2 minutes of trading window
+        EARLY_BUY_THRESHOLD = 3.5  # 3 minutes - don't buy in first 2 minutes of trading window
         max_positions = self.settings.max_positions_per_market
 
         # Get fresh time to close
