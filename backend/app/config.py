@@ -52,11 +52,11 @@ class Settings(BaseSettings):
     btc_min_price_difference: float = Field(default=10.0, description="Minimum BTC price difference from market open to place orders")
 
     # Strategy Parameters (configurable entry/exit levels)
-    trigger_price: float = Field(default=0.75, description="Entry trigger - buy when price >= this")
-    entry_min: float = Field(default=0.78, description="Minimum price for entry signal range (legacy)")
-    entry_max: float = Field(default=0.80, description="Maximum price for entry signal range (legacy)")
-    stoploss: float = Field(default=0.60, description="Stoploss price - limit sell placed here")
-    target: float = Field(default=0.99, description="Target price - limit sell placed here")
+    trigger_price: float = Field(default=0.70, description="Entry trigger - buy when price >= this")
+    entry_min: float = Field(default=0.70, description="Minimum price for entry signal range (legacy)")
+    entry_max: float = Field(default=0.85, description="Maximum price for entry signal range (legacy)")
+    stoploss: float = Field(default=0.50, description="Stoploss price - limit sell placed here")
+    target: float = Field(default=0.98, description="Target price - limit sell placed here")
     order_cancel_threshold: float = Field(default=0.167, description="Cancel unfilled orders when time to close < this (minutes). Default 10 seconds = 0.167 min")
     reentry_max_price: float = Field(default=0.9, description="Maximum price for re-entry after position cleared - skip if price > this")
 
